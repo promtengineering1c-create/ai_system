@@ -1,0 +1,1 @@
+"""Единые транспортно-независимые схемы Pydantic v2 для конвертов и полезной нагрузки (PRICE_SYNC, SUB_SYNC, UNSUB_EVENT, ORDER_CREATE, ACK_RECEIPT), используемые REST API и файловым шлюзом."""

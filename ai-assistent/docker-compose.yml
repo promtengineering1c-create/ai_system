@@ -1,0 +1,61 @@
+services:
+  # Обратный прокси (Traefik) - маршрутизирует трафик
+  traefik:
+    image: traefik:v2.10
+    command:
+      - "--api.insecure=true" # Включаем веб-дашборд Traefik (для тестов)
+      - "--providers.docker=true" # Слушаем Docker
+      - "--providers.docker.exposedbydefault=false" # Не выставляем наружу всё подряд
+      - "--entrypoints.web.address=:80" # Слушаем 80 порт
+    ports:
+      - "80:80"
+      - "8080:8080" # Порт для дашборда (ip_вашего_сервера:8080)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  # Брокер сообщений для Celery
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  # Наше основное веб-приложение (Django)
+  web:
+    build: ./app
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./app:/app
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.web.rule=PathPrefix(`/`)" # Все запросы идут на Django
+      - "traefik.http.services.web.loadbalancer.server.port=8000"
+    depends_on:
+      - redis
+
+  # Воркер для фоновых задач (Celery + LangGraph)
+  celery:
+    build: ./app
+    command: celery -A core worker -l info # "core" потом заменим на имя вашего проекта
+    volumes:
+      - ./app:/app
+    depends_on:
+      - redis
+
+# Локальная LLM (Qwen 32B)
+  llm:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: local-ai-agent
+    ports:
+      - "8081:8080" # Внешний порт 8081, внутренний 8080
+    volumes:
+      - /home/kali/models:/models
+    command: >
+      -m /models/qwen2.5-coder-14b-instruct-q2_k.gguf
+      --host 0.0.0.0
+      --port 8080
+      -t 12
+      -c 8192
+      -b 512
+      --flash-attn on
+      --parallel 1
+    restart: unless-stopped

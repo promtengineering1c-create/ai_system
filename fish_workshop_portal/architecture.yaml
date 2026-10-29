@@ -1,0 +1,485 @@
+root:
+  name: "fish_workshop_portal"
+  is_directory: true
+  description: "Корневая директория проекта омниканальной витрины и B2B-портала цеха рыбопереработки (Релиз 1.0 с архитектурным заделом под 1.1–2.0)."
+  children:
+    - name: "pyproject.toml"
+      is_directory: false
+      description: "Манифест проекта по стандарту PEP 621 для менеджера пакетов uv."
+    - name: "uv.lock"
+      is_directory: false
+      description: "Кроссплатформенный lock-файл для детерминированной фиксации дерева зависимостей uv."
+    - name: ".python-version"
+      is_directory: false
+      description: "Фиксация целевой версии интерпретатора Python 3.12 для uv и среды разработки VS Code."
+    - name: ".gitignore"
+      is_directory: false
+      description: "Правила исключений Git: виртуальные окружения, кэш, локальные БД, рабочие пакеты файлового шлюза (/exchange/* кроме .gitkeep) и секретные файлы окружения (.env, .env.development)."
+    - name: ".env.example"
+      is_directory: false
+      description: "Шаблон переменных окружения без секретов с полным перечнем префиксов для всех доменных классов конфигурации."
+    - name: ".env"
+      is_directory: false
+      description: "Конфигурационный файл для production-окружения (Ubuntu Server, Docker)."
+    - name: ".env.development"
+      is_directory: false
+      description: "Конфигурационный файл для локальной разработки на Kali Linux (включает режим отладки и Stub-провайдер капчи)."
+    - name: "Dockerfile"
+      is_directory: false
+      description: "Инструкция многоступенчатой сборки production-образа на базе Python 3.12 и uv для запуска веб-сервера и фонового воркера."
+    - name: ".dockerignore"
+      is_directory: false
+      description: "Исключение локальных артефактов, .git, .venv и файлов окружения из контекста сборки Docker-образа."
+    - name: "docker-compose.yml"
+      is_directory: false
+      description: "Оркестрация контейнеров: PostgreSQL, Redis, веб-приложение Django, фоновый воркер очереди задач/файлового шлюза и общие тома (/exchange/, медиа, кэш прайса)."
+    - name: "README.md"
+      is_directory: false
+      description: "Документация по развертыванию проекта через uv и Docker, спецификация контрактов обмена 1С <-> WEB и команд воркера."
+    - name: "manage.py"
+      is_directory: false
+      description: "Стандартная точка входа CLI Django для выполнения миграций, запуска сервера и кастомных management-команд."
+    - name: "config"
+      is_directory: true
+      description: "Инфраструктурный слой конфигурации Django, Composition Root (DI-контейнер), маршрутизация верхнего уровня и валидация переменных окружения через pydantic-settings."
+      children:
+        - name: "__init__.py"
+          is_directory: false
+          description: "Инициализация пакета инфраструктурной конфигурации и экспорт синглтона AppConfig."
+        - name: "env.py"
+          is_directory: false
+          description: "Каскадная загрузка окружения (.env.development / .env) и изолированные классы BaseSettings с env_prefix (DjangoSettings, DatabaseSettings, RedisSettings, SecuritySettings, ExchangeSettings, CaptchaSettings, SmtpSettings), объединенные в агрегатор AppConfig."
+        - name: "settings.py"
+          is_directory: false
+          description: "Настройки Django, инициализируемые строго из типизированного объекта AppConfig без прямых вызовов os.getenv."
+        - name: "container.py"
+          is_directory: false
+          description: "Composition Root (DI-контейнер): сборка прикладных сервисов и внедрение конкретных инфраструктурных адаптеров (IStorage, IXlsxRenderer, IRateLimiter, ICaptchaProvider, IMailer, IExchangeGateway)."
+        - name: "urls.py"
+          is_directory: false
+          description: "Корневой роутер URL: монтирование публичной витрины и контура авторизации/подписки (web), эндпоинта Django Ninja (/api/v1/exchange/) и административной панели."
+        - name: "wsgi.py"
+          is_directory: false
+          description: "Точка входа WSGI-сервера для синхронного контура."
+        - name: "asgi.py"
+          is_directory: false
+          description: "Точка входа ASGI-сервера для асинхронных обработчиков."
+    - name: "core"
+      is_directory: true
+      description: "Ядро переиспользуемых компонентов, базовых абстракций (ABC/Protocol), доменных исключений и чистых криптографических утилит."
+      children:
+        - name: "__init__.py"
+          is_directory: false
+          description: "Экспорт базовых интерфейсов, исключений и утилит ядра."
+        - name: "exceptions.py"
+          is_directory: false
+          description: "Иерархия прикладных исключений: ошибки валидации пакетов обмена, нарушение контрольных сумм SHA256, пустой пакет ассортимента, невалидные токены верификации/сброса пароля, превышение Rate Limit и ошибки капчи."
+        - name: "interfaces.py"
+          is_directory: false
+          description: "Протоколы и ABC-интерфейсы для внешних зависимостей: IStorage (save/load/delete/exists), IXlsxRenderer, IRateLimiter, ICaptchaProvider, IMailer, IExchangeGateway, IChannelAdapter (задел под бот MAX в Релизе 1.2)."
+        - name: "security.py"
+          is_directory: false
+          description: "Чистые функции генерации и валидации криптостойких токенов для Double Opt-In верификации и сброса пароля."
+        - name: "models.py"
+          is_directory: false
+          description: "Абстрактные базовые модели Django с автоматическими штампами времени created_at и updated_at."
+    - name: "db"
+      is_directory: true
+      description: "Слой хранения данных и доступа к БД (Django ORM модели и репозитории), изолированный на одном уровне с прикладными сценариями и интерфейсами."
+      children:
+        - name: "__init__.py"
+          is_directory: false
+          description: "Пакет слоя данных, объединяющий доменные ORM-приложения и репозитории."
+        - name: "users"
+          is_directory: true
+          description: "Подсистема хранения пользователей, учетных данных, токенов подтверждения и профилей подписки (с заделом под Релизы 1.1–2.0)."
+          children:
+            - name: "__init__.py"
+              is_directory: false
+              description: "Инициализация пакета моделей пользователей."
+            - name: "apps.py"
+              is_directory: false
+              description: "Конфигурация Django-приложения db.users."
+            - name: "models.py"
+              is_directory: false
+              description: "Кастомная модель User (email как USERNAME_FIELD, хэш пароля, опциональные phone, max_user_id, флаг is_verified_b2b по ADR-006, статус подписки, штамп согласия по 152-ФЗ/ФЗ-38 и JSONField анкеты по ADR-003)."
+            - name: "repositories.py"
+              is_directory: false
+              description: "Репозиторий для атомарного сохранения пользователей, обновления хэшей паролей и персистентной фиксации переходов состояния подписки (без принятия бизнес-решений о допустимости переходов)."
+            - name: "migrations"
+              is_directory: true
+              description: "Миграции схемы таблицы пользователей."
+              children:
+                - name: "__init__.py"
+                  is_directory: false
+                  description: "Пакет миграций приложения пользователей."
+        - name: "catalog"
+          is_directory: true
+          description: "Подсистема хранения регулярного ассортимента, версионированного штампа актуальности витрины и расписания выездной торговли."
+          children:
+            - name: "__init__.py"
+              is_directory: false
+              description: "Инициализация пакета моделей каталога."
+            - name: "apps.py"
+              is_directory: false
+              description: "Конфигурация Django-приложения db.catalog."
+            - name: "models.py"
+              is_directory: false
+              description: "Модели Category, Product (с полями sku, external_guid, price, min_order_qty, pack_multiplicity, is_wholesale по ADR-006), CatalogSyncMeta (монотонная версия каталога version и штамп актуальности прайса) и MobileTradeSchedule (график выездной торговли)."
+            - name: "repositories.py"
+              is_directory: false
+              description: "Репозиторий каталога: атомарная замена/обновление ассортимента с инкрементом версии CatalogSyncMeta под select_for_update и выборка активной матрицы."
+            - name: "migrations"
+              is_directory: true
+              description: "Миграции схемы каталога и метаданных синхронизации."
+              children:
+                - name: "__init__.py"
+                  is_directory: false
+                  description: "Пакет миграций приложения каталога."
+        - name: "exchange"
+          is_directory: true
+          description: "Подсистема журналирования пакетов обмена 1С <-> WEB, дедупликации и контроля сквозной нумерации сообщений."
+          children:
+            - name: "__init__.py"
+              is_directory: false
+              description: "Инициализация пакета моделей обмена."
+            - name: "apps.py"
+              is_directory: false
+              description: "Конфигурация Django-приложения db.exchange."
+            - name: "models.py"
+              is_directory: false
+              description: "Модели ExchangeNodeState (хранение счетчиков sent_msg_no и received_msg_no для пары узлов 1C и WEB) и ExchangePacketLog (аудит и дедупликация конвертов по уникальному ключу sender + msg_no и сверке sha256)."
+            - name: "repositories.py"
+              is_directory: false
+              description: "Репозиторий состояния узла обмена с блокировкой select_for_update для гарантии строгой последовательности номеров пакетов и идемпотентной регистрации."
+            - name: "migrations"
+              is_directory: true
+              description: "Миграции таблиц квитирования и аудита обмена."
+              children:
+                - name: "__init__.py"
+                  is_directory: false
+                  description: "Пакет миграций приложения обмена."
+        - name: "tasks"
+          is_directory: true
+          description: "Подсистема персистентной очереди фоновых задач в PostgreSQL с механизмом аренды (lease timeout)."
+          children:
+            - name: "__init__.py"
+              is_directory: false
+              description: "Инициализация пакета очереди задач."
+            - name: "apps.py"
+              is_directory: false
+              description: "Конфигурация Django-приложения db.tasks."
+            - name: "models.py"
+              is_directory: false
+              description: "Модель BackgroundTask (тип задачи, JSONField полезной нагрузки, статус PENDING/PROCESSING/DONE/FAILED, счетчик попыток retries, scheduled_at, locked_until для защиты от зависаний воркера, error_log)."
+            - name: "repositories.py"
+              is_directory: false
+              description: "Репозиторий очереди задач с конкурентным захватом PENDING и просроченных PROCESSING записей (по locked_until) в короткой транзакции через SELECT FOR UPDATE SKIP LOCKED."
+            - name: "migrations"
+              is_directory: true
+              description: "Миграции таблицы фоновых задач."
+              children:
+                - name: "__init__.py"
+                  is_directory: false
+                  description: "Пакет миграций очереди задач."
+    - name: "integrations"
+      is_directory: true
+      description: "Слой инфраструктурных адаптеров к внешним сервисам, рендерерам документов, хранилищам и транспортным протоколам (реализация интерфейсов из core.interfaces)."
+      children:
+        - name: "__init__.py"
+          is_directory: false
+          description: "Пакет внешних интеграций и инфраструктурных адаптеров."
+        - name: "storage"
+          is_directory: true
+          description: "Адаптер файлового хранилища для скомпилированного runtime-кэша .xlsx-прайса."
+          children:
+            - name: "__init__.py"
+              is_directory: false
+              description: "Экспорт реализации файлового хранилища."
+            - name: "local_fs.py"
+              is_directory: false
+              description: "Реализация интерфейса IStorage (save/load/delete/exists) поверх локальной ФС с защитой от Path Traversal и атомарной перезаписью через временный файл и os.replace."
+        - name: "xlsx"
+          is_directory: true
+          description: "Технический адаптер рендеринга Excel-документов на базе openpyxl."
+          children:
+            - name: "__init__.py"
+              is_directory: false
+              description: "Экспорт реализации генератора .xlsx по мастер-шаблону."
+            - name: "openpyxl_renderer.py"
+              is_directory: false
+              description: "Реализация IXlsxRenderer: чтение эталонного шаблона по PRICE_TEMPLATE_PATH, низкоуровневая работа с координатами ячеек, стилями и сериализация книги openpyxl в байтовый поток."
+        - name: "rate_limit"
+          is_directory: true
+          description: "Инфраструктурный адаптер ограничения частоты запросов на базе Redis."
+          children:
+            - name: "__init__.py"
+              is_directory: false
+              description: "Экспорт Redis-реализации лимитера."
+            - name: "redis_limiter.py"
+              is_directory: false
+              description: "Реализация интерфейса IRateLimiter (скользящее окно в Redis для контроля лимитов по IP и целевым идентификаторам)."
+        - name: "captcha"
+          is_directory: true
+          description: "Клиенты проверки капчи (Yandex SmartCaptcha для production и Stub для тестирования)."
+          children:
+            - name: "__init__.py"
+              is_directory: false
+              description: "Экспорт провайдеров капчи."
+            - name: "yandex.py"
+              is_directory: false
+              description: "Реализация ICaptchaProvider для серверной валидации токенов Yandex SmartCaptcha через переиспользуемый клиент httpx."
+            - name: "stub.py"
+              is_directory: false
+              description: "Детерминированная заглушка ICaptchaProvider для локальной разработки на Kali Linux и автотестов pytest."
+        - name: "mailer"
+          is_directory: true
+          description: "Адаптер отправки клиентских писем (разовая выдача .xlsx-прайса на Email, ссылки Double Opt-In и токены сброса пароля)."
+          children:
+            - name: "__init__.py"
+              is_directory: false
+              description: "Экспорт почтового адаптера."
+            - name: "smtp_client.py"
+              is_directory: false
+              description: "Реализация IMailer для отправки транзакционных писем и вложений через SMTP."
+        - name: "file_gateway"
+          is_directory: true
+          description: "Адаптер файлово-пакетного шлюза /exchange/ для обмена с 1С (чтение 1c_to_web, запись в web_to_1c, ротация в archive и error)."
+          children:
+            - name: "__init__.py"
+              is_directory: false
+              description: "Экспорт классов файлового шлюза и схем манифеста."
+            - name: "schemas.py"
+              is_directory: false
+              description: "Pydantic-модели файла-манифеста *_meta.json (использующие общие контракты из services.exchange.contracts)."
+            - name: "gateway.py"
+              is_directory: false
+              description: "Реализация IExchangeGateway: проверка контрольных сумм SHA256, чтение/запись пар *_meta.json и *_payload.json/.xlsx, атомарное перемещение пакетов в archive/ или error/."
+    - name: "services"
+      is_directory: true
+      description: "Слой прикладных сценариев (Use Cases) и бизнес-правил, координирующий транзакции БД, задачи очереди и вызовы адаптеров через внедренные интерфейсы."
+      children:
+        - name: "__init__.py"
+          is_directory: false
+          description: "Пакет прикладных сервисов приложения."
+        - name: "xlsx_generator.py"
+          is_directory: false
+          description: "Прикладной сценарий сборки прайса: определение состава колонок и товаров по бизнес-правилам (ADR-006), вызов IXlsxRenderer и атомарная публикация в IStorage с защитой от перезаписи устаревшей версией каталога (Stale Artifact Protection)."
+        - name: "catalog_service.py"
+          is_directory: false
+          description: "Сценарий управления витриной: валидация непустого пакета ассортимента, обновление БД, инкремент версии CatalogSyncMeta и постановка задачи на пересборку .xlsx в единой транзакции."
+        - name: "price_delivery_service.py"
+          is_directory: false
+          description: "Сценарий клиентской выдачи прайса: проверка бизнес-лимитов (IRateLimiter) и ICaptchaProvider, возврат байтового потока кэшированного прайса из IStorage (без формирования HTTP-ответов) и постановка задачи на отправку по Email."
+        - name: "account_service.py"
+          is_directory: false
+          description: "Сценарии управления аккаунтом: регистрация пользователя с паролем, генерация и проверка токенов подтверждения Email и восстановления доступа."
+        - name: "subscription_service.py"
+          is_directory: false
+          description: "Сценарии управления подпиской: сохранение JSONField-анкеты, фиксация согласия по 152-ФЗ/ФЗ-38, проверка допустимости переходов статуса подписки и запись исходящих событий SUB_SYNC / UNSUB_EVENT в одной транзакции."
+        - name: "exchange"
+          is_directory: true
+          description: "Пакет координации обмена 1С <-> WEB, объединяющий транспортно-независимые контракты, протокол квитирования и маршрутизацию событий."
+          children:
+            - name: "__init__.py"
+              is_directory: false
+              description: "Экспорт контрактов, процессора протокола и обработчиков событий обмена."
+            - name: "contracts.py"
+              is_directory: false
+              description: "Единые транспортно-независимые схемы Pydantic v2 для конвертов и полезной нагрузки (PRICE_SYNC, SUB_SYNC, UNSUB_EVENT, ORDER_CREATE, ACK_RECEIPT), используемые REST API и файловым шлюзом."
+            - name: "processor.py"
+              is_directory: false
+              description: "Обработчик протокола обмена: контроль сквозной нумерации (msg_no/received_no), идемпотентная дедупликация через ExchangePacketLog в единой транзакции с применением данных и выпуск ACK_RECEIPT строго после коммита."
+            - name: "handlers.py"
+              is_directory: false
+              description: "Маршрутизатор событий обмена, делегирующий полезную нагрузку конвертов в прикладные сценарии catalog_service и subscription_service."
+    - name: "api"
+      is_directory: true
+      description: "Слой REST JSON API на базе Django Ninja для синхронного обмена с 1С (/api/v1/exchange/)."
+      children:
+        - name: "__init__.py"
+          is_directory: false
+          description: "Инициализация пакета REST API и экспорт экземпляра NinjaAPI."
+        - name: "auth.py"
+          is_directory: false
+          description: "Аутентификация запросов 1С по Bearer-токену из SecuritySettings с защитой от тайминг-атак (secrets.compare_digest)."
+        - name: "schemas.py"
+          is_directory: false
+          description: "Адаптация и реэкспорт общих контрактов из services.exchange.contracts для OpenAPI-спецификации Django Ninja."
+        - name: "routers.py"
+          is_directory: false
+          description: "Единый эндпоинт POST /api/v1/exchange/, принимающий конверты от 1С и делегирующий обработку в services.exchange.processor."
+    - name: "web"
+      is_directory: true
+      description: "Слой пользовательского веб-интерфейса (Django Templates + HTMX + Alpine.js): публичная витрина, HTTP-отдача файлов, сессии, формы с Honeypot и сценарии онбординга."
+      children:
+        - name: "__init__.py"
+          is_directory: false
+          description: "Инициализация пакета веб-интерфейса."
+        - name: "apps.py"
+          is_directory: false
+          description: "Конфигурация Django-приложения web."
+        - name: "urls.py"
+          is_directory: false
+          description: "Маршруты публичной витрины, скачивания/отправки прайса, 3-шаговой регистрации-подписки, входа, сброса пароля по Email и отписки."
+        - name: "forms.py"
+          is_directory: false
+          description: "Веб-формы разового запроса прайса, регистрации, шагов анкеты, входа и сброса пароля с проверкой скрытых Honeypot-полей."
+        - name: "views.py"
+          is_directory: false
+          description: "Тонкие HTTP-контроллеры: рендеринг шаблонов, управление Django-сессиями и cookies, оборачивание байтового потока прайса в FileResponse (или возврат Http404) и вызов сервисов через config.container."
+        - name: "templates"
+          is_directory: true
+          description: "HTML-шаблоны интерфейса с поддержкой HTMX и реактивных компонентов Alpine.js."
+          children:
+            - name: "base.html"
+              is_directory: false
+              description: "Базовый макет страницы с подключением HTMX, Alpine.js и виджета Yandex SmartCaptcha."
+            - name: "web"
+              is_directory: true
+              description: "Шаблоны страниц публичной витрины и пользовательского контура."
+              children:
+                - name: "index.html"
+                  is_directory: false
+                  description: "Главная страница витрины: о цехе, навигация к магазину, график выездной торговли и экранный прайс со штампом актуальности."
+                - name: "auth"
+                  is_directory: true
+                  description: "Шаблоны регистрации-подписки, входа, сброса пароля и отписки (адаптированные под браузер и MAX Mini App)."
+                  children:
+                    - name: "login.html"
+                      is_directory: false
+                      description: "Страница входа по Email и паролю."
+                    - name: "onboarding_wizard.html"
+                      is_directory: false
+                      description: "Контейнер 3-шагового мастера регистрации и оформления подписки (Double Opt-In)."
+                    - name: "password_reset_request.html"
+                      is_directory: false
+                      description: "Форма запроса ссылки на сброс пароля по Email."
+                    - name: "password_reset_confirm.html"
+                      is_directory: false
+                      description: "Форма установки нового пароля по токену из письма."
+                    - name: "unsubscribe.html"
+                      is_directory: false
+                      description: "Единая страница подтверждения отписки от рассылки."
+                - name: "partials"
+                  is_directory: true
+                  description: "HTMX-фрагменты для частичного обновления DOM без перезагрузки страницы."
+                  children:
+                    - name: "email_price_form.html"
+                      is_directory: false
+                      description: "Интерактивный фрагмент формы разовой отправки прайса на Email."
+                    - name: "price_table.html"
+                      is_directory: false
+                      description: "Фрагмент таблицы регулярного ассортимента с фильтрацией по категориям."
+                    - name: "onboarding_step.html"
+                      is_directory: false
+                      description: "HTMX-фрагмент текущего шага мастера регистрации и анкеты подписчика."
+        - name: "static"
+          is_directory: true
+          description: "Статические ресурсы фронтенда."
+          children:
+            - name: "css"
+              is_directory: true
+              description: "Таблицы стилей витрины."
+              children:
+                - name: "main.css"
+                  is_directory: false
+                  description: "Стили публичной витрины и адаптивной мобильной верстки (с учетом будущего открытия в MAX Mini App)."
+    - name: "cli"
+      is_directory: true
+      description: "Слой командного интерфейса, инфраструктурного раннера фоновых задач и точек запуска процессов (management commands)."
+      children:
+        - name: "__init__.py"
+          is_directory: false
+          description: "Инициализация пакета CLI-команд и раннера воркера."
+        - name: "apps.py"
+          is_directory: false
+          description: "Конфигурация Django-приложения cli."
+        - name: "worker_runner.py"
+          is_directory: false
+          description: "Инфраструктурный исполнитель фоновых процессов: цикл опроса очереди PostgreSQL (с захватом задач по lease timeout и выполнением внешних сетевых вызовов вне транзакции БД), экспоненциальный retry, поллинг /exchange/1c_to_web/ и делегирование в прикладные сервисы."
+        - name: "management"
+          is_directory: true
+          description: "Стандартный каталог расширений manage.py."
+          children:
+            - name: "__init__.py"
+              is_directory: false
+              description: "Пакет management-расширений."
+            - name: "commands"
+              is_directory: true
+              description: "Точки запуска консольных воркеров в контексте Django."
+              children:
+                - name: "__init__.py"
+                  is_directory: false
+                  description: "Пакет консольных команд."
+                - name: "run_worker.py"
+                  is_directory: false
+                  description: "Точка запуска worker-процесса: инициализация обработчиков сигналов ОС (SIGTERM/SIGINT) и передача управления в cli.worker_runner."
+    - name: "assets"
+      is_directory: true
+      description: "Директория статических мастер-ресурсов для генератора документов."
+      children:
+        - name: "templates_xlsx"
+          is_directory: true
+          description: "Хранилище эталонных шаблонов Excel, единых для 1С и Django."
+          children:
+            - name: ".gitkeep"
+              is_directory: false
+              description: "Фиксация директории шаблонов в Git на Этапе 1."
+            - name: "price_master_template.xlsx"
+              is_directory: false
+              description: "Мастер-шаблон прайса со служебными колонками SKU/GUID и полем количества к заказу по ADR-006 (вводится на Этапе 5)."
+    - name: "exchange"
+      is_directory: true
+      description: "Физическая структура директорий файлово-пакетного шлюза для обмена между 1С и сайтом."
+      children:
+        - name: "1c_to_web"
+          is_directory: true
+          description: "Директория входящих файловых пакетов от 1С ({1C}_{WEB}_{MSG_NO}_meta.json и payload)."
+          children:
+            - name: ".gitkeep"
+              is_directory: false
+              description: "Фиксация пустой директории в Git."
+        - name: "web_to_1c"
+          is_directory: true
+          description: "Директория исходящих файловых пакетов от сайта для 1С ({WEB}_{1C}_{MSG_NO}_meta.json и payload)."
+          children:
+            - name: ".gitkeep"
+              is_directory: false
+              description: "Фиксация пустой директории в Git."
+        - name: "archive"
+          is_directory: true
+          description: "Архив успешно обработанных и квитированных файловых пакетов."
+          children:
+            - name: ".gitkeep"
+              is_directory: false
+              description: "Фиксация пустой директории в Git."
+        - name: "error"
+          is_directory: true
+          description: "Карантин сбойных файловых пакетов (ошибки структуры или несовпадение SHA256) для ручного разбора менеджером."
+          children:
+            - name: ".gitkeep"
+              is_directory: false
+              description: "Фиксация пустой директории в Git."
+    - name: "tests"
+      is_directory: true
+      description: "Слой автоматизированного тестирования на базе pytest."
+      children:
+        - name: "__init__.py"
+          is_directory: false
+          description: "Инициализация пакета тестов."
+        - name: "conftest.py"
+          is_directory: false
+          description: "Фикстуры pytest: временные директории tmp_path, переопределение настроек и сброс кэша DI-контейнера config.container."
+        - name: "test_storage.py"
+          is_directory: false
+          description: "Модульные тесты LocalFileSystemStorage: атомарная запись, чтение, удаление и защита от Path Traversal."
+        - name: "test_env.py"
+          is_directory: false
+          description: "Тесты каскадной загрузки окружения (.env + .env.{APP_ENV}) и валидации доменных классов в config.env."
+        - name: "test_views.py"
+          is_directory: false
+          description: "Интеграционные тесты главной страницы витрины и эндпоинта скачивания прайса (/price/download/)."
+        - name: "test_exchange.py"
+          is_directory: false
+          description: "Тесты процессора обмена, проверки SHA256 в файловом шлюзе, защиты от пустого пакета прайса и идемпотентного квитирования номеров сообщений."
