@@ -1,3 +1,17 @@
+# GitHub
+
+promtengineering1c@gmail.com
+
+git config --global user.name "promtengineering1c-create"
+git config --global user.email "promtengineering1c@gmail.com"
+
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+sudo apt update
+sudo apt install gh -y
+
+gh repo create ai_system --public --source=. --remote=origin --push
+
 # Создание сетевой папки 
 sudo apt update && sudo apt install samba -y
 sudo mkdir -p /srv/samba/share
@@ -18,6 +32,8 @@ ls -la /srv/samba/share
    stat cache = no
 ````
 sudo systemctl restart smbd
+
+sudo systemctl enable smbd добавить в автозагрузку
 
 # Установка uv
 which uv или uv --version

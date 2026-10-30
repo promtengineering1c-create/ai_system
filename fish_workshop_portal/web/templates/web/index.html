@@ -1,1 +1,49 @@
-Главная страница витрины: о цехе, навигация к магазину, график выездной торговли и экранный прайс со штампом актуальности.
+<!-- Главная страница витрины: о цехе, навигация к магазину, график выездной торговли и экранный прайс со штампом актуальности.-->
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Витрина - Цех рыбопереработки{% endblock %}
+
+{% block content %}
+<section class="hero-section">
+    <h1>Свежая продукция рыбопереработки</h1>
+    <p>Регулярный ассортимент, опт и розница. Наша точка расположена....</p>
+</section>
+
+<section class="info-section">
+    <h2>Схема проезда</h2>
+    <!-- stub: interactive Yandex/2GIS map widget goes here -->
+    <div class="map-container" style="background: #eee; padding: 2rem; text-align: center; margin-bottom: 2rem;">
+        [ Интерактивная карта ]
+    </div>
+</section>
+
+<section class="schedule-section">
+    <h2>График выездной торговли</h2>
+    <!-- TBD(depends: stage 3): Рендеринг таблицы графика из модели MobileTradeSchedule -->
+    <p>Временно недоступен.</p>
+</section>
+
+<section class="price-section">
+    <h2>Актуальный прайс-лист</h2>
+    <!-- TBD(depends: stages 2-6): Вывод штампа времени из CatalogSyncMeta -->
+
+    {% if has_price %}
+        <div class="action-buttons" style="margin: 1.5rem 0;">
+            <a href="{% url 'web:price_download' %}" class="btn btn-primary" download>
+                Скачать прайс (.xlsx)
+            </a>
+        </div>
+
+        <!-- TBD(depends: stage 7): HTMX-форма запроса прайса на Email (partials/email_price_form.html) -->
+        <div id="email-price-form-container"></div>
+    {% else %}
+        <div class="alert alert-warning" role="alert">
+            Актуальный прайс-лист в данный момент формируется или обновляется из 1С. Пожалуйста, зайдите позже.
+        </div>
+    {% endif %}
+
+    <!-- TBD(depends: stage 6): HTMX + Alpine.js интерактивная таблица каталога (partials/price_table.html) -->
+    <div id="catalog-table-container"></div>
+</section>
+{% endblock %}
