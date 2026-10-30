@@ -50,7 +50,6 @@ htmlcov/
 
 cache/
 staticfiles/
-tests/
 
 exchange/1c_to_web/*
 !exchange/1c_to_web/.gitkeep
