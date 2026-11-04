@@ -17,7 +17,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # dummy envs to collect static without database connection
 RUN DJANGO__SECRET_KEY=build-dummy-key \
     APP_ENV=production \
-    DB_HOST=localhost \
+    DB_HOST=db-dummy \
+    DB_PORT=5432 \
+    DB_NAME=dummy_db \
+    DB_USER=dummy_user \
+    DB_PASSWORD=dummy_pass \
+    REDIS_URL=redis://dummy-redis:6379/0 \
+    SECURITY_API_TOKEN=dummy-token \
+    SMTP_HOST=dummy-smtp \
+    SMTP_USER=dummy \
+    SMTP_PASSWORD=dummy \
+    SMTP_DEFAULT_FROM=dummy@local \
     .venv/bin/python manage.py collectstatic --noinput
 
 FROM python:3.12-slim-bookworm

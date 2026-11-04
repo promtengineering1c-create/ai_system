@@ -13,8 +13,6 @@ services:
       retries: 10
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
 
   web:
     build:
@@ -25,6 +23,8 @@ services:
       - .env
     environment:
       DB_HOST: db
+      STORAGE_CACHE_DIR: /app/cache
+      EXCHANGE_BASE_DIR: /exchange
     depends_on:
       db:
         condition: service_healthy
@@ -34,8 +34,8 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./cache:/app/cache
-      - ./exchange:/exchange
+      - ./storage/cache:/app/cache
+      - ./storage/exchange:/exchange
 
 volumes:
   pgdata:

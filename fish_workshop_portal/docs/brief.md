@@ -10,6 +10,8 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githu
 sudo apt update
 sudo apt install gh -y
 
+gh auth login
+
 gh repo create ai_system --public --source=. --remote=origin --push
 
 # Создание сетевой папки 
@@ -65,3 +67,12 @@ uv add "django~=5.2" "pydantic-settings~=2.16" "whitenoise~=6.12"
 uv add "psycopg[binary]~=3.3"
 
 uv add --dev pytest pytest-django pytest-cov ruff
+
+export APP_ENV=development
+
+python manage.py runserver 0.0.0.0:8000
+
+ln -sf .env.development .env семилинк?
+
+docker compose up --build
+docker compose down
