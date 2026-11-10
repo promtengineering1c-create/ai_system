@@ -1,6 +1,8 @@
 # GitHub
-
 promtengineering1c@gmail.com
+
+sudo apt update
+sudo apt install git -y
 
 git config --global user.name "promtengineering1c-create"
 git config --global user.email "promtengineering1c@gmail.com"
