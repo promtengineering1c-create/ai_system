@@ -1,28 +1,68 @@
-Шаг 5.1 (Вариант Б coordinated) — вызов нереализованной командыПроблема: В коде прописан вызов python manage.py set_maintenance_mode on с комментарием # Шаблон для будущей реализации Maintenance Mode. Если в проекте нет кастомной management-команды set_maintenance_mode, шаг завершится с Unknown command. Кроме того, middleware-режим обслуживания не останавливает фоновые задачи (Celery/cron).   3. Инфраструктурные и конфигурационные несоответствияШагДефект / РазрывПоследствие и решение2.12 vs 3.1.2 vs 3.2.2В 2.12 критерий места для rollback_dir — ≥ 1× размера БД. В 3.1.2 скрипт требует ≥ 2× размера TARGET_DIR (exit 24), а в 3.2.2 пишет туда же дамп БД без проверки остатка места.   При большом storage (медиа/файлы внутри target.project_dir) проверка 2.12 пройдет, а 3.1.2 упадет с exit 24. В 2.12 нужно проверять 2× TARGET_DIR + 1× DB_SIZE.   2.12 vs 4.2.Б, 4.4.В, 5.2, 5.3.1В 2.12 вообще не проверяется место на исходном сервере (source.project_dir для дампа в 5.2) и в /tmp на обоих серверах (куда пишутся repo.bundle, compose_images.tar и db_dump).   На Ubuntu 24.04 /tmp часто смонтирован в tmpfs (ОЗУ). Архив образов compose_images.tar (1–3 ГБ) в 4.4.В переполнит /tmp. Использовать под временные артефакты каталог на диске (rollback_dir / домашний каталог) и проверять df -Pk на источнике.   3.3 vs 4.4.В (mode=initial)Требование явного image: для всех сервисов с build: указано только в 3.3 (который пропускается при mode=initial).   Если имена папок source.project_dir и target.project_dir отличаются (а name: в docker-compose.yml не задан), в 4.4.В docker compose config --images на источнике и цели вернет разные имена образов, и проверка на цели упадет с exit 27. Вынести проверку в 2.5.   4.3 (Доставка .env)1. Переменная MIGRATION_MODE объявлена, но не проверяется и не используется.   2. Нет chmod 0600 "$SECRETS_DST".3. Файл .env копируется напрямую с тестового сервера (Kali) на prod (Ubuntu).   Если secrets.source_path указывает на рабочий тестовый .env Kali, он перезапишет prod-настройки (ALLOWED_HOSTS, DEBUG, ключи), после чего шаг 7.2 упадет с HTTP 400 DisallowedHost. Зафиксировать в 4.3 chmod 0600 и явно указать, что secrets.source_path должен ссылаться на подготовленный prod-конфиг.   5.3.2 (Перенос хранилищ)В команде rsync отсутствует флаг --delete, а также не закрыта скобка (.   При mode=update и transfer=true старые удаленные на источнике файлы останутся в целевом хранилище. Если нужна зеркальная синхронизация — добавить --delete. 
+diff
+--- a/migration.md  (после предложенного фикса)
++++ b/migration.md  (с поправкой)
+@@ ~4.2.В, блок PRUNES/FIND_ARGS/chown/rsync
+-PRUNES=()
++# Защитный chown корня: find -mindepth 1 не трогает '.',
++# а non-sudo rsync --delete требует запись в '.'
++sudo chown "$(id -un):$(id -gn)" .
++
++PRUNES=()
+ if [[ "$PG_KIND" == "bind" && "$PG_SRC" != /* ]]; then
+     PRUNES+=("$(norm "$PG_SRC")")
+ fi
+@@ ~4.2.В, блок rsync
+ rsync -avz --delete \
+-    -e "ssh -T -p ⚠️**<source.ssh.port>** -o BatchMode=yes" \
++    -e "ssh -T -p ⚠️**<source.ssh.port>** -o BatchMode=yes -o ConnectTimeout=5" \
+     --rsync-path="sudo -k -n rsync" \
+     --exclude='.git' \
+     --exclude='.venv' \
+Пункты 2, 4, 6 — вне scope этого фикса, но их стоит зафиксировать отдельным тикетом на унификацию -e "ssh ..." по всем rsync-вызовам runbook'а.
 
-**Фиксация результата (обязательно)**: По окончании операции выполняется запись в журнал оператора (§1, «Журнал оператора») формата: 
-2.8\<Время>\source\<Количество активных писателей>. Ниже перечень писателей, по одной строке на писателя, в формате: 
-<тип>\<идентификатор>\<источник обнаружения>\<остановлен: нет>
-- тип — container | cron | systemd-timer | external-db-client;
-- идентификатор — имя сервиса Compose, команда cron, имя unit, client_addr;
-- источник обнаружения — docker compose ps | crontab -l | systemctl list-timers | pg_stat_activity.client_addr;
-- остановлен — изначально нет.
-Без этой записи шаг 2.8 не считается выполненным, и переход к шагам 3.0 и 5.1 запрещён.
-Связь с другими шагами: Запись `2.8` — входной чек-лист для шага 5.1 (остановка writers исходного сервера). На этом шаге каждый пункт файла должен быть либо остановлен (поле «остановлен» → да), либо явно обоснован как неактивный с записью обоснования в журнал.
+Diff (принят без изменений):
 
-**Фиксация результата (обязательно)**: По окончании операции выполняется запись в журнал оператора (§1, «Журнал оператора») формата:
-```text
-2.8\<Время>\source\обнаружено: <N>
-````
-Далее — по одной строке на каждого писателя: 
-```text
-<тип>: <идентификатор> (<источник обнаружения>); остановлен: нет
-````
-тип — container | cron | systemd-timer | external-db-client;
-идентификатор — имя сервиса Compose, команда cron, имя unit, client_addr;
-источник обнаружения — docker compose ps | crontab -l | systemctl list-timers | pg_stat_activity.client_addr;
-остановлен — изначально нет.
+diff
+--- a/migration.md
++++ b/migration.md
+@@ -348,7 +348,8 @@
+     sudo -n true 2>/dev/null || { echo "STOP: passwordless sudo недоступен (2.10)" >&2; exit 1; }
+     DU_EXCLUDES=()
+     if [[ "$PG_KIND" == "bind" && "$PG_SRC" != /* ]]; then
+-        DU_EXCLUDES=("--exclude=${TARGET_DIR%/}/${PG_SRC#./}")
++        PG_REL="${PG_SRC#./}"; PG_REL="${PG_REL%/}"
++        DU_EXCLUDES=("--exclude=${TARGET_DIR%/}/${PG_REL}")
+     fi
+     sudo du -sh "${DU_EXCLUDES[@]}" -- "$TARGET_DIR"
+ )
+@@ -457,7 +458,8 @@
+ 
+ DU_EXCLUDES=()
+ if [[ "$PG_KIND" == "bind" && "$PG_SRC" != /* ]]; then
+-    DU_EXCLUDES=("--exclude=${TARGET_DIR}/${PG_SRC#./}")
++    PG_REL="${PG_SRC#./}"; PG_REL="${PG_REL%/}"
++    DU_EXCLUDES=("--exclude=${TARGET_DIR}/${PG_REL}")
+ fi
+ SRC_KB="$(du -sk "${DU_EXCLUDES[@]}" -- "$TARGET_DIR" | awk '{print $1}')"
+ 
+@@ -476,7 +478,7 @@
+ RSYNC_EXCLUDES=()
+ if [[ "$PG_KIND" == "bind" && "$PG_SRC" != /* ]]; then
+     # Исключаем относительный путь PGDATA (относительно корня $TARGET_DIR)
+-    RSYNC_EXCLUDES=("--exclude=/${PG_SRC#./}")
++    RSYNC_EXCLUDES=("--exclude=/${PG_REL}")
+ fi
+ 
+ rsync -aHAX --numeric-ids --delete "${RSYNC_EXCLUDES[@]}" -- "$TARGET_DIR/" "$BACKUP_DIR/" \
+@@ -1188,7 +1190,8 @@
+ # ── 5. формирование исключений и восстановление ──
+ RSYNC_EXCLUDES=()
+ if [[ "$PG_KIND" == "bind" && "$PG_SRC" != /* ]]; then
+-    RSYNC_EXCLUDES=("--exclude=/${PG_SRC#./}")
++    PG_REL="${PG_SRC#./}"; PG_REL="${PG_REL%/}"
++    RSYNC_EXCLUDES=("--exclude=/${PG_REL}")
+ fi
+ 
+ sudo rsync -aHAX --numeric-ids --delete "${RSYNC_EXCLUDES[@]}" -- "$BACKUP/" "$TARGET_PROJECT_DIR/" \
+Вне scope: аналогичная проверка trailing slash отсутствует для secrets.target_relative_path и storage.items[*].target_relative_path в 4.2.В, 5.3.2, 6.1. Если эти пути могут содержать завершающий /, исключения/chown/rsync будут работать некорректно. Унификация через общий norm() в этих шагах — отдельный тикет.
 
-Без итоговой записи 2.8 source шаг 2.8 не считается выполненным, и переход к шагу 5.1 запрещён.
-
-Связь с другими шагами: записи 2.8 source — входной чек-лист для шага 5.1 (остановка writers исходного сервера). На этом шаге по каждому писателю вносится запись `<тип>: <идентификатор> (<источник обнаружения>); остановлен: да`, либо обоснование, почему он неактивен. 
