@@ -1,4 +1,4 @@
-# Перенос приложения на Ubuntu
+# Перенос приложения на Ubuntu (DJANGO + DOCKER COMPOSE + POSTGRESQL)
 
 ## 1. Назначение, границы и правила выполнения
 
@@ -2249,8 +2249,8 @@ HC_PATH=⚠️**<application.healthcheck.path>**
 cd -- "$TARGET_PROJECT_DIR"
 
 docker compose exec -T "$APP_SERVICE" python - \
-+    "http://127.0.0.1:$HC_CONTAINER_PORT$HC_PATH" \
-+    "$APP_HOST" <<'PY'
+    "http://127.0.0.1:$HC_CONTAINER_PORT$HC_PATH" \
+    "$APP_HOST" <<'PY'
 import sys
 import urllib.error
 import urllib.request
@@ -2834,9 +2834,11 @@ echo "  next   : 8.4 (поднять образ, зафиксированный 
 ```bash
 (
 set -Eeuo pipefail
-trap 'rc=$?; echo "FAIL 8.4.B rc=$rc line=$LINENO" >&2' ERR
+trap 'rc=$?; echo "FAIL 8.4 rc=$rc line=$LINENO" >&2' ERR
 
-cd -- "⚠️**<target.project_dir>**"
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+
+cd -- "$TARGET_PROJECT_DIR"
 docker compose up -d --no-build
 )
 ```
@@ -2846,11 +2848,14 @@ docker compose up -d --no-build
 **Место 1 (целевой сервер):**
 
 ```bash
-cd ⚠️**<target.project_dir>**
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+APP_SERVICE=⚠️**<application.service>**
+
+cd "$TARGET_PROJECT_DIR"
 
 # Проверка успешного старта всех контейнеров
 docker compose ps
-docker compose logs --tail=50 ⚠️**<application.service>**
+docker compose logs --tail=50 "$APP_SERVICE"
 ```
 
 Запустите внешние источники записи на **целевом** сервере (`worker`, `cron`, `systemd-таймеры`), которые были остановлены на шаге 3.0.
@@ -2862,7 +2867,9 @@ docker compose logs --tail=50 ⚠️**<application.service>**
 - **При `capture_method = stop_writers` (Вариант А шага 5.1):**
 
 ```bash
-cd ⚠️**<source.project_dir>**
+SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
+
+cd "$SOURCE_PROJECT_DIR"
 # Запуск ВСЕХ остановленных сервисов Compose-стека.
 # Если контейнеры на источнике были удалены (docker compose down), команда fallback поднимет их заново.
 docker compose start || docker compose up -d
@@ -2874,10 +2881,13 @@ docker compose ps
 - **При `capture_method = coordinated` (Вариант Б шага 5.1):**
 
 ```bash
-cd ⚠️**<source.project_dir>**
+SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
+APP_SERVICE=⚠️**<application.service>**
+
+cd "$SOURCE_PROJECT_DIR"
 # Гарантируем, что контейнер application работает до вызова exec (защита от остановки в период между 5.1 и 8.4)
-docker compose start ⚠️**<application.service>** || docker compose up -d ⚠️**<application.service>**
-docker compose exec -T ⚠️**<application.service>** python manage.py set_maintenance_mode off
+docker compose start "$APP_SERVICE" || docker compose up -d "$APP_SERVICE"
+docker compose exec -T "$APP_SERVICE" python manage.py set_maintenance_mode off
 ```
 
 После отключения режима обслуживания запустите остановленные в 5.1.Б.1 фоновые воркеры и внешние источники записи (`cron`, `systemd`-таймеры).

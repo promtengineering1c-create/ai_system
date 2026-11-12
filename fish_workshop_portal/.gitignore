@@ -61,3 +61,5 @@ exchange/error/*
 !exchange/error/.gitkeep
 
 /storage/
+
+temporary*

@@ -1,4 +1,4 @@
-# Перенос приложения на Ubuntu
+# Перенос приложения на Ubuntu (DJANGO + DOCKER COMPOSE + POSTGRESQL)
 
 ## 1. Назначение, границы и правила выполнения
 
@@ -27,6 +27,19 @@ YAML содержит входные параметры и заранее выб
 
 Секреты в YAML не записываются. Для файла секретов указываются только исходный и целевой пути; его содержимое не выводится в команды или журнал.
 
+### Матрица режимов (migration.mode × database.mode)
+
+Комбинация осей строго регламентирует исполнение шагов резервирования (3.x), переноса (5.x) и восстановления (6.x):
+
+| migration.mode | database.mode | Поведение и допустимость |
+| :--- | :--- | :--- |
+| **initial** | **restore** | **Допустимо (первый перенос с БД).** Откат (3.1, 3.2) пропускается. Дамп переносится (5.2, 5.3.1) и разворачивается (6.2.А). |
+| **initial** | **fresh** | **Допустимо (чистая установка).** Откат пропускается. Перенос дампа пропускается. Том БД инициализируется пустым (6.2.Б). |
+| **initial** | **keep** | **НЕДОПУСТИМО.** Целевой БД не существует, сохранять нечего. |
+| **update** | **keep** | **Допустимо (типовое обновление).** Откат создается. Перенос дампа пропускается. БД цели сохраняется (6.2.В). |
+| **update** | **restore** | **Допустимо (перезапись БД цели).** Откат создается. Дамп переносится и безусловно замещает БД цели (6.2.А). |
+| **update** | **fresh** | **НЕДОПУСТИМО.** Шаг 6.2.Б не очищает существующий том (фактически отработает как keep). Для сброса БД использовать initial с удалением директории. |
+
 ### Правила выполнения
 
 - Каждая развилка ссылается на определяющий её ключ: например, `migration.config.yaml: code_delivery.method`.
@@ -54,7 +67,11 @@ YAML содержит входные параметры и заранее выб
 Подключение к исходному серверу по параметрам `migration.config:source.ssh.*`.
 
 ```bash
-ssh -p ⚠️**<source.ssh.port>** ⚠️**<source.ssh.user>**@⚠️**<source.ssh.host>**
+SOURCE_SSH_PORT=⚠️**<source.ssh.port>**
+SOURCE_SSH_USER=⚠️**<source.ssh.user>**
+SOURCE_SSH_HOST=⚠️**<source.ssh.host>**
+
+ssh -p "$SOURCE_SSH_PORT" "$SOURCE_SSH_USER"@"$SOURCE_SSH_HOST"
 ```
 
 **Ожидаемый результат:** открыта сессия на исходном сервере.
@@ -79,7 +96,11 @@ id -un
 Подключение к целевому серверу по параметрам `migration.config:target.ssh.*`.
 
 ```bash
-ssh -p ⚠️**<target.ssh.port>** ⚠️**<target.ssh.user>**@⚠️**<target.ssh.host>**
+TARGET_SSH_PORT=⚠️**<target.ssh.port>**
+TARGET_SSH_USER=⚠️**<target.ssh.user>**
+TARGET_SSH_HOST=⚠️**<target.ssh.host>**
+
+ssh -p "$TARGET_SSH_PORT" "$TARGET_SSH_USER"@"$TARGET_SSH_HOST"
 ```
 
 **Ожидаемый результат:** открыта сессия на целевом сервере.
@@ -102,7 +123,9 @@ id -un
 **Место выполнения:** исходный сервер, Bash.
 
 ```bash
-cd ⚠️**<source.project_dir>**
+SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
+
+cd "$SOURCE_PROJECT_DIR"
 ls -la docker-compose.yml
 docker compose config --images
 ```
@@ -126,8 +149,10 @@ docker compose version
 
 ```bash
 (
-test -f ⚠️**<target.project_dir>**/docker-compose.yml || { echo "STOP: нет docker-compose.yml при mode=update" >&2; exit 1; }
-cd ⚠️**<target.project_dir>**
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+
+test -f "$TARGET_PROJECT_DIR"/docker-compose.yml || { echo "STOP: нет docker-compose.yml при mode=update" >&2; exit 1; }
+cd "$TARGET_PROJECT_DIR"
 docker compose config --images | grep -i postgres
 )
 ```
@@ -166,6 +191,7 @@ require_value() {
 }
 
 set -Eeuo pipefail
+
 TARGET_DIR="⚠️**<target.project_dir>**"
 ROLLBACK_DIR="⚠️**<journal.rollback_dir>**"
 JOURNAL="⚠️**<journal.path>**"
@@ -190,7 +216,9 @@ if [[ "$PG_KIND" == "bind" ]]; then
     fi
 fi
 )
-cd ⚠️**<target.project_dir>**
+TARGET_DIR="⚠️**<target.project_dir>**"
+
+cd "$TARGET_DIR"
 pwd
 ```
 
@@ -201,7 +229,12 @@ pwd
 **Место выполнения:** исходный сервер, Bash.
 
 ```bash
-cd ⚠️**<source.project_dir>**
+SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
+DB_SERVICE=⚠️**<database.service>**
+DB_USER=⚠️**<database.environment_keys.user>**
+DB_NAME=⚠️**<database.environment_keys.name>**
+
+cd "$SOURCE_PROJECT_DIR"
 docker compose ps
 # Пользовательский crontab и crontab root; диагностику не скрывать.
 crontab -l || printf '%s\n' 'Проверьте диагностику выше: допустимо только «no crontab for ...».' >&2
@@ -217,17 +250,17 @@ sudo sh -c '
 systemctl list-timers --all --no-pager
 
 # Активные соединения к СУБД — это и есть фактические writers
-docker compose exec -T ⚠️**<database.service>** sh -c 'psql \
-    -U "$⚠️**<database.environment_keys.user>**" -d "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}" \
-    -c "select usename, client_addr, state, backend_type from pg_stat_activity \
-        where pid <> pg_backend_pid() order by state, usename"'
+docker compose exec -T "$DB_SERVICE" sh -c "psql \
+    -U \"\$$DB_USER\" -d \"\${$DB_NAME:-\$$DB_USER}\" \
+    -c \"select usename, client_addr, state, backend_type from pg_stat_activity \
+        where pid <> pg_backend_pid() order by state, usename\""
 
 # Долгие транзакции: снимок при них возможен, но WAL-хвост нельзя усечь
-docker compose exec -T ⚠️**<database.service>** sh -c 'psql \
-    -U "$⚠️**<database.environment_keys.user>**" -d "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}" \
-    -c "select pid, state, now()-xact_start as age, left(query,60) \
+docker compose exec -T "$DB_SERVICE" sh -c "psql \
+    -U \"\$$DB_USER\" -d \"\${$DB_NAME:-\$$DB_USER}\" \
+    -c \"select pid, state, now()-xact_start as age, left(query,60) \
         from pg_stat_activity where xact_start is not null and pid <> pg_backend_pid() \
-        order by age desc limit 10"'
+        order by age desc limit 10\""
 ```
 
 **Ожидаемый результат**: Выведены запущенные контейнеры, cron-задачи, systemd-таймеры и список соединений к СУБД. На этом этапе ничего не останавливается.
@@ -258,8 +291,12 @@ docker compose exec -T ⚠️**<database.service>** sh -c 'psql \
 Шаги 4.2 (вариант Б) и 5.3 тянут данные с исходного сервера по SSH. Ключевая аутентификация должна работать в обе стороны, запрос пароля недопустим: rsync в неинтерактивном режиме при отсутствии ключа зависнет или упадёт.
 
 ```bash
-ssh -p ⚠️**<source.ssh.port>** -o BatchMode=yes -o ConnectTimeout=5 \
-⚠️**<source.ssh.user>**@⚠️**<source.ssh.host>** 'echo REVERSE_OK; id -un; command -v rsync' 
+SOURCE_SSH_PORT=⚠️**<source.ssh.port>**
+SOURCE_SSH_USER=⚠️**<source.ssh.user>**
+SOURCE_SSH_HOST=⚠️**<source.ssh.host>**
+
+ssh -p "$SOURCE_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=5 \
+"$SOURCE_SSH_USER"@"$SOURCE_SSH_HOST" 'echo REVERSE_OK; id -un; command -v rsync' 
 ```
 Ожидаемый результат: REVERSE_OK, имя пользователя совпадает с ⚠️**<source.ssh.user>, путь к rsync выведен.
 
@@ -295,8 +332,13 @@ docker info --format '{{.DockerRootDir}} {{.ServerVersion}}'
 ```bash
 (
 set -Eeuo pipefail
-ssh -T -p ⚠️**<source.ssh.port>** -o BatchMode=yes -o ConnectTimeout=5 \
-  ⚠️**<source.ssh.user>**@⚠️**<source.ssh.host>** \
+
+SOURCE_SSH_PORT=⚠️**<source.ssh.port>**
+SOURCE_SSH_USER=⚠️**<source.ssh.user>**
+SOURCE_SSH_HOST=⚠️**<source.ssh.host>**
+
+ssh -T -p "$SOURCE_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=5 \
+  "$SOURCE_SSH_USER"@"$SOURCE_SSH_HOST" \
   'sudo -k -n rsync --version'
 echo "SOURCE_RSYNC_SUDO_OK"
 )
@@ -334,11 +376,16 @@ date -u +'%s %FT%TZ'
 Исходный сервер:
 
 ```bash
-cd ⚠️**<source.project_dir>**
-docker compose exec -T ⚠️**<database.service>** sh -c 'psql \
--U "$⚠️**<database.environment_keys.user>**" -d "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}" \
--tAc "select pg_size_pretty(pg_database_size(current_database())), \
-            pg_database_size(current_database())"'
+SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
+DB_SERVICE=⚠️**<database.service>**
+DB_USER=⚠️**<database.environment_keys.user>**
+DB_NAME=⚠️**<database.environment_keys.name>**
+
+cd "$SOURCE_PROJECT_DIR"
+docker compose exec -T "$DB_SERVICE" sh -c "psql \
+    -U \"\$$DB_USER\" -d \"\${$DB_NAME:-\$$DB_USER}\" \
+    -tAc \"select pg_size_pretty(pg_database_size(current_database())), \
+    pg_database_size(current_database())\""
 df -Ph            
 ``` 
  
@@ -402,11 +449,19 @@ if [[ "$PG_KIND" == "bind" ]]; then
 fi
 
 df -Ph "${DF_TARGETS[@]}"
-du -sh "$TARGET_DIR"
+sudo -n true 2>/dev/null || { echo "STOP: passwordless sudo недоступен (2.10)" >&2; exit 1; }
+    DU_EXCLUDES=()
+    if [[ "$PG_KIND" == "bind" && "$PG_SRC" != /* ]]; then
+        PG_REL="${PG_SRC#./}"; PG_REL="${PG_REL%/}"
+        DU_EXCLUDES=("--exclude=${TARGET_DIR%/}/${PG_REL}")
+    fi
+    sudo du -sh "${DU_EXCLUDES[@]}" -- "$TARGET_DIR"
 )
 ``` 
  
 **Ожидаемый результат:** свободное место на ФС исходного сервера — достаточно для размещения дампа БД и архива образов (при 4.4.В); свободное место на ФС `DockerRootDir` (и на ФС `database.pgdata.source` при `kind=bind`) — не менее 3× размера БД; свободное место на ФС `journal.rollback_dir` — не менее суммы 1× размера БД и 2× размера каталога проекта.
+
+/tmp на источнике используется для repo.bundle (4.2.Б), compose_images.tar (4.4.В), db_dump_*.dump (5.2). Если /tmp — отдельная ФС, df -Ph на источнике должен покрывать и её: добавить в исходный листинг `df -Ph /tmp` и сверить с теми же порогами. (в блоке «Исходный сервер» шага 2.12 добавить:) df -Ph /tmp
  
 **Условия остановки:** любой из порогов не выполнен. Отдельно: проверяемые директории должны находиться на разных ФС, либо суммарный запас места проверяется по каждой ФС в отдельности. 
  
@@ -426,10 +481,11 @@ rsync --version | head -1
 **Место 2: исходный сервер, Bash.** Проверка совместимости `rsync` и фиксация образа БД.
  
  ```bash
-rsync --version | head -1
+SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
 
- cd ⚠️**<source.project_dir>**
- docker compose config --images | grep -i postgres
+rsync --version | head -1
+cd "$SOURCE_PROJECT_DIR"
+docker compose config --images | grep -i postgres
  ```
 
 **Ожидаемый результат:** Все перечисленные утилиты найдены на целевом сервере (отсутствует вывод `MISSING`). Обе стороны используют `rsync` версии 3.x (передача прав и UID/GID флагами `-aHAX --numeric-ids` между версиями 2.x и 3.x может отработать некорректно). Тег образа СУБД зафиксирован оператором.
@@ -538,7 +594,7 @@ ROLLBACK_DIR="⚠️**<journal.rollback_dir>**"
 MIGRATION_MODE="⚠️**<migration.mode>**"
 JOURNAL="⚠️**<journal.path>**"
 PG_KIND="⚠️**<database.pgdata.kind>**"
-PG_SRC="⚠️**<database.pgdata.source>**
+PG_SRC="⚠️**<database.pgdata.source>**"
 
 # ============================================================================
 # 0. Проверка подстановки (оба маркера, а не только один)
@@ -636,7 +692,13 @@ initial)
 [[ -d "$ROLLBACK_DIR" && -w "$ROLLBACK_DIR" ]] \
     || { echo "STOP: rollback_dir недоступен на запись: $ROLLBACK_DIR" >&2; exit 24; }
 
-SRC_KB="$(du -sk -- "$TARGET_DIR" | awk '{print $1}')"
+DU_EXCLUDES=()
+if [[ "$PG_KIND" == "bind" && "$PG_SRC" != /* ]]; then
+    PG_REL="${PG_SRC#./}"; PG_REL="${PG_REL%/}"
+    DU_EXCLUDES=("--exclude=${TARGET_DIR}/${PG_REL}")
+fi
+SRC_KB="$(du -sk "${DU_EXCLUDES[@]}" -- "$TARGET_DIR" | awk '{print $1}')"
+
 AVAIL_KB="$(df -Pk -- "$ROLLBACK_DIR" | awk 'NR==2{print $4}')"
 
 [[ -n "${SRC_KB:-}" && -n "${AVAIL_KB:-}" ]] \
@@ -658,7 +720,7 @@ mkdir -p -- "$BACKUP_DIR" \
 RSYNC_EXCLUDES=()
 if [[ "$PG_KIND" == "bind" && "$PG_SRC" != /* ]]; then
     # Исключаем относительный путь PGDATA (относительно корня $TARGET_DIR)
-    RSYNC_EXCLUDES=("--exclude=/${PG_SRC#./}")
+    RSYNC_EXCLUDES=("--exclude=/${PG_REL}")
 fi
 
 rsync -aHAX --numeric-ids --delete "${RSYNC_EXCLUDES[@]}" -- "$TARGET_DIR/" "$BACKUP_DIR/" \
@@ -712,9 +774,9 @@ sudo chmod 0750 /usr/local/bin/backup-project.sh
 sudo /usr/local/bin/backup-project.sh
 
 **Ожидаемый результат:**
-- `mode=update`: в `⚠️**<journal.rollback_dir>**` создан каталог `files_backup_<TS>_<pid>` c полной копией `⚠️**<target.project_dir>**`; рядом — `files_backup_<TS>_<pid>.manifest.sha256`; в журнал добавлена строка `3.1 <ts> ok backup=... files=N`.
+- `mode=update`: в `journal.rollback_dir` создан каталог `files_backup_<TS>_<pid>` c полной копией `target.project_dir`; рядом — `files_backup_<TS>_<pid>.manifest.sha256`; в журнал добавлена строка `3.1 <ts> ok backup=... files=N`.
 - `mode=initial`: выведено `3.1: mode=initial — точка отката по файлам не создаётся`, в журнал добавлена строка `3.1 <ts> skipped mode=initial`, код возврата 0.
-- В `⚠️**<target.project_dir>**` не создано ни одного нового файла.
+- В `target.project_dir` не создано ни одного нового файла.
 
 **Условия остановки:** код возврата ≠ 0; отсутствие строки `3.1 ... ok` в журнале при `mode=update`.
 
@@ -978,10 +1040,17 @@ TARGET_PROJECT_DIR="⚠️**<target.project_dir>**"
 ROLLBACK_DIR="⚠️**<journal.rollback_dir>**"
 DB_SERVICE="⚠️**<database.service>**"
 JOURNAL="⚠️**<journal.path>**"
+PG_KIND="⚠️**<database.pgdata.kind>**"
+PG_SRC="⚠️**<database.pgdata.source>**"
 
 for v in TARGET_PROJECT_DIR ROLLBACK_DIR JOURNAL; do
     val="${!v}"
     [[ -n "$val" && "$val" == /* && "$val" != *'⚠️'* && "$val" != *'<'* && "$val" != *'>'* && "$val" != *'['* && "$val" != *']'* && "$val" != *'**'* ]] \
+        || { echo "STOP: $v не подставлена: '$val'" >&2; exit 22; }
+done
+for v in PG_KIND PG_SRC; do
+    val="${!v}"
+    [[ -n "$val" && "$val" != *'⚠️'* && "$val" != *'<'* && "$val" != *'>'* && "$val" != *'['* && "$val" != *']'* && "$val" != *'**'* ]] \
         || { echo "STOP: $v не подставлена: '$val'" >&2; exit 22; }
 done
 [[ -n "$DB_SERVICE" && "$DB_SERVICE" != *'⚠️'* && "$DB_SERVICE" != *'<'* && "$DB_SERVICE" != *'>'* && "$DB_SERVICE" != *'['* && "$DB_SERVICE" != *']'* && "$DB_SERVICE" != *'**'* ]] \
@@ -1024,7 +1093,18 @@ DB_IN_DUMP="$(sed -n 's/^; *dbname: *//p' <<<"$HEADER" | head -1)"
     || { echo "STOP: имя БД в дампе '$DB_IN_DUMP' ≠ объявленному '$DB_NAME'" >&2; exit 48; }
 
 # ── 5. место для восстановления ──
-AVAIL_KB="$(df -Pk "$(docker info --format '{{.DockerRootDir}}')" | awk 'NR==2{print $4}')"
+if [[ "$PG_KIND" == "bind" ]]; then
+    if [[ "$PG_SRC" == /* ]]; then
+        PG_DF_PATH="$PG_SRC"
+    else
+        PG_DF_PATH="${TARGET_PROJECT_DIR}/${PG_SRC}"
+    fi
+    while [[ ! -d "$PG_DF_PATH" && "$PG_DF_PATH" != "/" ]]; do PG_DF_PATH="$(dirname -- "$PG_DF_PATH")"; done
+else
+    PG_DF_PATH="$(docker info --format '{{.DockerRootDir}}')"
+fi
+AVAIL_KB="$(df -Pk "$PG_DF_PATH" | awk 'NR==2{print $4}')"
+
 # Старые метаданные без физического размера БД требуют повторения 3.2.2.
 [[ "$DB_SIZE_BYTES" =~ ^[1-9][0-9]*$ ]] \
     || { echo "STOP: нет корректного DB_SIZE_BYTES в $RESULTS — повторить 3.2.2" >&2; exit 50; }
@@ -1035,6 +1115,12 @@ NEED_KB=$(( (DB_SIZE_BYTES * 3 + 1023) / 1024 ))
 
 printf '3.2.3\t%s\tok\trun_id=%s\tdump=%s\tsha256=%s\ttoc=%s\tpg=%s\n' \
     "$(date -u +%FT%TZ)" "$RUN_ID" "$DUMP" "$DUMP_SHA256" "$ENTRIES" "$PG_MAJOR" >> "$JOURNAL"
+
+# Возврат в состояние заморозки 3.0.2: дамп снят и сверен, БД не должна
+# принимать записи до 6.2 (особенно database.mode=keep: иначе записи после
+# MVCC-снимка 3.2.2 не попадут в rollback-дамп и будут потеряны в 8.3).
+docker compose stop "$DB_SERVICE" \
+    || { echo "STOP: не удалось остановить $DB_SERVICE после 3.2.3" >&2; exit 32; }
 
 echo "OK 3.2.3"
 echo "  run_id  : $RUN_ID"
@@ -1074,10 +1160,13 @@ echo "  pg_major: $PG_MAJOR (цель должна быть ≥)"
 set -Eeuo pipefail
 trap 'rc=$?; echo "FAIL 3.3 rc=$rc line=$LINENO" >&2' ERR
 
-if [[ "⚠️**<migration.mode>**" == "update" ]]; then
-    cd -- "⚠️**<target.project_dir>**"
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+ROLLBACK_DIR=⚠️**<journal.rollback_dir>**
+MIGRATION_MODE=⚠️**<migration.mode>**
 
-    ROLLBACK_IMAGE_ARCHIVE="⚠️**<journal.rollback_dir>**/images_rollback.tar"
+if [[ "$MIGRATION_MODE" == "update" ]]; then
+    cd -- "$TARGET_PROJECT_DIR"
+    ROLLBACK_IMAGE_ARCHIVE="$ROLLBACK_DIR/images_rollback.tar"
     mapfile -t ROLLBACK_IMAGES < <(docker compose config --images | sort -u)
 
     ((${#ROLLBACK_IMAGES[@]} > 0)) \
@@ -1112,9 +1201,11 @@ fi
 *(Выполняется, если `migration.config:code_delivery.method` — `remote_git` или `local_git`)*
 
 ```bash
+CD_URL=⚠️**<code_delivery.remote_git.url>**
+
 git --version
 # Только для remote_git:
-git ls-remote ⚠️**<code_delivery.remote_git.url>**
+git ls-remote "$CD_URL"
 ```
 
 **Ожидаемый результат:** Утилита `git` установлена. Команда `ls-remote` вывела список веток удаленного репозитория без интерактивного запроса пароля.
@@ -1123,7 +1214,11 @@ git ls-remote ⚠️**<code_delivery.remote_git.url>**
 
 *(Оператор выбирает и выполняет только один из вариантов А, Б или В согласно `migration.config:code_delivery.method`)*
 
-*(КРИТИЧНО: все относительные пути `secrets.target_relative_path`, `storage.items[*].target_relative_path` и `code_delivery.exclude_paths` должны указываться строго от корня `target.project_dir` без ведущего префикса `./` или `/` — например, `.env`, `storage/media`. Если `database.pgdata.kind` — `bind` и `source` является относительным путём (находится внутри проекта), оператор **ОБЯЗАН** добавить значение `source` в массив `code_delivery.exclude_paths` в YAML. Иначе `git clean -fd` или `rsync --delete` безвозвратно удалят файлы базы данных целевого сервера. При наличии `./` фильтры `git clean -e` и `rsync --exclude` не сработают, что приведёт к удалению продуктивных данных)*
+*(КРИТИЧНО: все относительные пути `secrets.target_relative_path`, `storage.items[*].target_relative_path` и `code_delivery.exclude_paths` должны указываться строго от корня `target.project_dir` без ведущего префикса `./` или `/` — например, `.env`, `storage/media`. При наличии `./` фильтры исключений не сработают, что приведёт к удалению продуктивных данных. Директория БД (PGDATA) защищается скриптом автоматически.)*
+
+*(Примечание: при обновлении runbook'а на серверах, где ранее выполнялись прерванные прогоны 4.2.Б/4.4.В/5.2, в `source.project_dir` могут остаться `repo.bundle`, `compose_images.tar*`, `db_dump_*.dump`. До первого прогона новой версии удалить их вручную: `rm -f ⚠️**<source.project_dir>**/{repo.bundle,compose_images.tar*,db_dump_*.dump}`.)*
+
+**ОБЯЗАН** добавить значение `source` в массив `code_delivery.exclude_paths` в YAML. Иначе `git clean -fd` или `rsync --delete` безвозвратно удалят файлы базы данных целевого сервера. При наличии `./` фильтры `git clean -e` и `rsync --exclude` не сработают, что приведёт к удалению продуктивных данных)*
 
 **Вариант А (remote_git)**
 
@@ -1134,12 +1229,59 @@ git ls-remote ⚠️**<code_delivery.remote_git.url>**
 set -Eeuo pipefail
 trap 'rc=$?; echo "FAIL 4.2.A rc=$rc line=$LINENO" >&2' ERR
 
-cd ⚠️**<target.project_dir>**
+ARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+CD_URL=⚠️**<code_delivery.remote_git.url>**
+CD_REF=⚠️**<code_delivery.remote_git.ref>**
+EXCLUDE_PATH_1=⚠️**<code_delivery.exclude_paths[0]>**
+TARGET_STORAGE_1=⚠️**<storage.items[0].target_relative_path>**
+SECRETS_REL=⚠️**<secrets.target_relative_path>**
+
+PG_KIND="⚠️**<database.pgdata.kind>**"
+PG_SRC="⚠️**<database.pgdata.source>**"
+
+cd "$TARGET_PROJECT_DIR"
+
+EXCL=("$EXCLUDE_PATH_1"\
+    "$TARGET_STORAGE_1"\
+    "$SECRETS_REL")
+
+norm() { local v="${1#./}"; printf '%s' "${v%/}"; }
+
+# Валидация раскрытия плейсхолдеров и нормализация; пустые после norm отбрасываются.
+declare -a NORM_EXCL=()
+if [[ "$PG_KIND" == "bind" && "$PG_SRC" != /* ]]; then
+    NORM_EXCL=("$(norm "$PG_SRC")")
+fi
+for ex in "${EXCL[@]}"; do
+    [[ -n "$ex" ]] || continue
+    case "$ex" in
+        *'⚠️'*|*'<'*|*'>'*|*'['*|*']'*|*'**'*)
+            echo "STOP 4.2.A: EXCL содержит нераскрытый плейсхолдер: '$ex'" >&2
+            exit 22 ;;
+    esac
+    n="$(norm "$ex")"
+    [[ -n "$n" ]] \
+        || { echo "STOP 4.2.A: EXCL-элемент нормализуется в пусто: '$ex'" >&2; exit 23; }
+    NORM_EXCL+=("$n")
+done
+
+GIT_CLEAN_EXCLUDES=()
+for n in "${NORM_EXCL[@]}"; do
+    GIT_CLEAN_EXCLUDES+=("-e" "/$n")
+done
+
 git init
-git remote add origin ⚠️**<code_delivery.remote_git.url>** 2>/dev/null || git remote set-url origin ⚠️**<code_delivery.remote_git.url>**
-git fetch origin ⚠️**<code_delivery.remote_git.ref>**
+git remote add origin "$CD_URL" 2>/dev/null || git remote set-url origin "$CD_URL"
+git fetch origin "$CD_REF"
+# Pre-checkout: восстановить владение рабочим деревом от текущего пользователя.
+# Иначе при mode=update checkout падает на tracked-файлах, принадлежащих root/container UID.
+# Не использовать sudo git checkout: он сделает промежуточные каталоги root-owned,
+# а последующий chown возвращает владение только файлам, не каталогам.
+sudo chown -R "$(id -un):$(id -gn)" .
 git checkout -f FETCH_HEAD
-sudo git -c safe.directory="*" clean -fd -e '⚠️**<secrets.target_relative_path>**' -e '⚠️**<storage.items[*].target_relative_path>**' -e '⚠️**<code_delivery.exclude_paths[*]>**'
+sudo git -c safe.directory="*" clean -fd "${GIT_CLEAN_EXCLUDES[@]}"
+sudo git -c safe.directory="*" ls-files -z | xargs -0 -r sudo chown -h "$(id -un):$(id -gn)"
+sudo chown -R "$(id -un):$(id -gn)" .git
 )
 ```
 
@@ -1152,30 +1294,93 @@ sudo git -c safe.directory="*" clean -fd -e '⚠️**<secrets.target_relative_pa
 set -Eeuo pipefail
 trap 'rc=$?; echo "FAIL 4.2.B/source rc=$rc line=$LINENO" >&2' ERR
 
-cd ⚠️**<source.project_dir>**
-git update-ref refs/bundle/target ⚠️**<code_delivery.local_git.ref>**
-git bundle create ⚠️**<source.project_dir>**/repo.bundle refs/bundle/target
+SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
+CD_REF_LOCAL=⚠️**<code_delivery.local_git.ref>**
+
+cd "$SOURCE_PROJECT_DIR"
+BUNDLE_DIR="$(mktemp -d /tmp/repo.bundle.XXXXXX)"
+trap 'rm -rf -- "$BUNDLE_DIR"' EXIT
+BUNDLE_PATH="${BUNDLE_DIR}/repo.bundle"
+git update-ref refs/bundle/target "$CD_REF_LOCAL"
+git bundle create "$BUNDLE_PATH" refs/bundle/target
 git update-ref -d refs/bundle/target
+
+echo "BUNDLE_PATH=$BUNDLE_PATH"
 )
 ```
+BUNDLE_PATH — путь, который оператор передаёт в 4.2.Б Место 2 и 3. trap EXIT удалит BUNDLE_DIR при выходе из subshell — но bundle нужен Месту 2 (target-стороне). Поэтому trap НЕ ставим на source-стороне; вместо этого передаём BUNDLE_PATH оператору, а cleanup — в Месте 3.
 
 **Место 2 (целевой сервер):**
 
 ```bash
-cd ⚠️**<target.project_dir>**
-rsync -avP -e "ssh -p ⚠️**<source.ssh.port>**" ⚠️**<source.ssh.user>**@⚠️**<source.ssh.host>**:⚠️**<source.project_dir>**/repo.bundle ⚠️**<journal.rollback_dir>**/repo.bundle
+(
+set -Eeuo pipefail
+trap 'rc=$?; echo "FAIL 4.2.B/target rc=$rc line=$LINENO" >&2' ERR
+
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+ROLLBACK_DIR=⚠️**<journal.rollback_dir>**
+SOURCE_SSH_PORT=⚠️**<source.ssh.port>**
+SOURCE_SSH_USER=⚠️**<source.ssh.user>**
+SOURCE_SSH_HOST=⚠️**<source.ssh.host>**
+EXCLUDE_PATH_1=⚠️**<code_delivery.exclude_paths[0]>**
+TARGET_STORAGE_1=⚠️**<storage.items[0].target_relative_path>**
+SECRETS_REL=⚠️**<secrets.target_relative_path>**
+
+PG_KIND="⚠️**<database.pgdata.kind>**"
+PG_SRC="⚠️**<database.pgdata.source>**"
+
+cd "$TARGET_PROJECT_DIR"
+rsync -avP -e "ssh -p $SOURCE_SSH_PORT" "$SOURCE_SSH_USER"@"$SOURCE_SSH_HOST":/tmp/repo.bundle "$ROLLBACK_DIR"/repo.bundle
+
+EXCL=("$EXCLUDE_PATH_1"\
+    "$TARGET_STORAGE_1"\
+    "$SECRETS_REL")
+
+norm() { local v="${1#./}"; printf '%s' "${v%/}"; }
+
+# Валидация раскрытия плейсхолдеров и нормализация; пустые после norm отбрасываются.
+declare -a NORM_EXCL=()
+if [[ "$PG_KIND" == "bind" && "$PG_SRC" != /* ]]; then
+    NORM_EXCL=("$(norm "$PG_SRC")")
+fi
+for ex in "${EXCL[@]}"; do
+    [[ -n "$ex" ]] || continue
+    case "$ex" in
+        *'⚠️'*|*'<'*|*'>'*|*'['*|*']'*|*'**'*)
+            echo "STOP 4.2.A: EXCL содержит нераскрытый плейсхолдер: '$ex'" >&2
+            exit 22 ;;
+    esac
+    n="$(norm "$ex")"
+    [[ -n "$n" ]] \
+        || { echo "STOP 4.2.A: EXCL-элемент нормализуется в пусто: '$ex'" >&2; exit 23; }
+    NORM_EXCL+=("$n")
+done
+
+GIT_CLEAN_EXCLUDES=()
+for n in "${NORM_EXCL[@]}"; do
+    GIT_CLEAN_EXCLUDES+=("-e" "/$n")
+done
+
 git init
-git fetch ⚠️**<journal.rollback_dir>**/repo.bundle refs/bundle/target
+git fetch "$ROLLBACK_DIR"/repo.bundle refs/bundle/target
+# Pre-checkout: восстановить владение рабочим деревом от текущего пользователя.
+# Иначе при mode=update checkout падает на tracked-файлах, принадлежащих root/container UID.
+# Не использовать sudo git checkout: он сделает промежуточные каталоги root-owned,
+# а последующий chown возвращает владение только файлам, не каталогам.
+sudo chown -R "$(id -un):$(id -gn)" .
 git checkout -f FETCH_HEAD
-sudo git -c safe.directory="*" clean -fd -e '⚠️**<secrets.target_relative_path>**' -e '⚠️**<storage.items[*].target_relative_path>**' -e '⚠️**<code_delivery.exclude_paths[*]>**'
-rm ⚠️**<journal.rollback_dir>**/repo.bundle
+sudo git -c safe.directory="*" clean -fd "${GIT_CLEAN_EXCLUDES[@]}"
+sudo git -c safe.directory="*" ls-files -z | xargs -0 -r sudo chown -h "$(id -un):$(id -gn)"
+sudo chown -R "$(id -un):$(id -gn)" .git
+rm "$ROLLBACK_DIR"/repo.bundle
+)
 ```
 *(Примечание: каждый исключаемый путь передается отдельным флагом, например: `-e 'media' -e 'logs'`. Если список `exclude_paths` пуст — соответствующие флаги `-e` опускаются во избежание ошибки пустого паттерна. Для файлов, уже учтенных в `.gitignore`, флаг `-e` избыточен, так как `git clean -fd` без ключа `-x` их не удаляет.)*
 
 **Место 3 (исходный сервер):**
 
 ```bash
-rm ⚠️**<source.project_dir>**/repo.bundle
+rm /tmp/repo.bundle
 ```
 
 **Вариант В (no_git)**
@@ -1183,10 +1388,104 @@ rm ⚠️**<source.project_dir>**/repo.bundle
 **Место выполнения:** целевой сервер, Bash.
 
 ```bash
-cd ⚠️**<target.project_dir>**
-# Очистка кэша, созданного контейнером, во избежание Permission denied при синхронизации
-sudo find . -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
-rsync -avz --delete -e "ssh -p ⚠️**<source.ssh.port>**" --exclude='.git' --exclude='.venv' --exclude='__pycache__' --exclude='⚠️**<secrets.target_relative_path>**' --exclude='⚠️**<storage.items[*].target_relative_path>**' ⚠️**<source.ssh.user>**@⚠️**<source.ssh.host>**:⚠️**<source.project_dir>**/ .
+(
+set -Eeuo pipefail
+
+ARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
+SOURCE_SSH_PORT=⚠️**<source.ssh.port>**
+SOURCE_SSH_USER=⚠️**<source.ssh.user>**
+SOURCE_SSH_HOST=⚠️**<source.ssh.host>**
+EXCLUDE_PATH_1=⚠️**<code_delivery.exclude_paths[0]>**
+SOURCE_STORAGE_1=⚠️**<storage.items[0].source_relative_path>**
+TARGET_STORAGE_1=⚠️**<storage.items[0].target_relative_path>**
+SECRETS_REL=⚠️**<secrets.target_relative_path>**
+
+PG_KIND="⚠️**<database.pgdata.kind>**"
+PG_SRC="⚠️**<database.pgdata.source>**"
+
+cd "$TARGET_PROJECT_DIR" || { echo "STOP 4.2.В: cd не выполнен" >&2; exit 26; }
+
+EXCL=("$EXCLUDE_PATH_1"\
+    "$SOURCE_STORAGE_1"\
+    "$TARGET_STORAGE_1"\
+    "$SECRETS_REL")
+
+norm() { local v="${1#./}"; printf '%s' "${v%/}"; }
+
+if [[ "$PG_KIND" == "bind" && "$PG_SRC" != /* ]]; then
+    PG_REL="$(norm "$PG_SRC")"
+    guard_ok=0
+    for ex in "${EXCL[@]}"; do
+        [[ -n "$ex" && "$(norm "$ex")" == "$PG_REL" ]] && { guard_ok=1; break; }
+    done
+    [[ "$guard_ok" == 1 ]] || {
+        echo "STOP 4.2.В: database.pgdata.source=$PG_REL не входит в --exclude; sudo rsync --delete удалит PGDATA" >&2
+        exit 23
+    }
+fi
+
+# Защитный chown корня: find -mindepth 1 не трогает '.',
+# а non-sudo rsync --delete требует запись в '.'
+sudo chown "$(id -un):$(id -gn)" .
+
+# Валидация EXCL: плейсхолдеры должны быть раскрыты оператором до выполнения.
+# norm "./" == "" -> пустой элемент исключал бы всё дерево (--exclude=/).
+NORM_EXCL=()
+for ex in "${EXCL[@]}"; do
+    [[ -n "$ex" ]] || continue
+    case "$ex" in
+        *'⚠️'*|*'<'*|*'>'*|*'['*|*']'*|*'**'*)
+            echo "STOP 4.2.В: EXCL содержит нераскрытый плейсхолдер: '$ex'" >&2
+            exit 22 ;;
+    esac
+    n="$(norm "$ex")"
+    [[ -n "$n" ]] \
+        || { echo "STOP 4.2.В: EXCL-элемент нормализуется в пусто: '$ex'" >&2; exit 23; }
+    NORM_EXCL+=("$n")
+done
+
+PRUNES=()
+for n in "${NORM_EXCL[@]}"; do
+    [[ "$n" == "${PRUNES[0]:-}" ]] && continue
+    PRUNES+=("$n")
+fi
+for ex in "${EXCL[@]}"; do
+    [[ -n "$ex" ]] && PRUNES+=("$(norm "$ex")")
+done
+
+FIND_ARGS=()
+for p in "${PRUNES[@]}"; do
+    FIND_ARGS+=( "-path" "./$p" "-o" "-path" "./$p/*" "-o" )
+done
+
+if ((${#FIND_ARGS[@]} > 0)); then
+    sudo find . -mindepth 1 \( "${FIND_ARGS[@]:0:${#FIND_ARGS[@]}-1}" \) -prune -o -exec chown -h "$(id -un):$(id -gn)" {} +
+else
+    sudo find . -mindepth 1 -exec chown -h "$(id -un):$(id -gn)" {} +
+fi
+RSYNC_EXCLUDES=(
+        "--exclude=/.git"
+        "--exclude=/.venv"
+        "--exclude=.git"
+        "--exclude=.venv"
+        "--exclude=__pycache__"
+        "--exclude=*.pyc"
+)
+for p in "${PRUNES[@]}"; do
+    [[ -n "$p" ]] || continue
+    RSYNC_EXCLUDES+=( "--exclude=/$p" )
+done
+
+rsync -avz --delete \
+    -e "ssh -T -p $SOURCE_SSH_PORT -o BatchMode=yes -o ConnectTimeout=5" \
+    --rsync-path="sudo -k -n rsync" \
+    "${RSYNC_EXCLUDES[@]}" \
+    "$SOURCE_SSH_USER"@"$SOURCE_SSH_HOST":"$SOURCE_PROJECT_DIR"/ .
+
+sudo find . -mindepth 1 -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+
+)     
 ```
 *(Оператор обязательно дополняет команду ключами `--exclude` из `code_delivery.exclude_paths`, иначе флаг `--delete` удалит не учтенные директории)*
 
@@ -1206,22 +1505,66 @@ trap 'rc=$?; echo "FAIL 4.3 rc=$rc line=$LINENO" >&2' ERR
 TARGET_PROJECT_DIR="⚠️**<target.project_dir>**"
 SECRETS_SRC="⚠️**<secrets.source_path>**"
 SECRETS_REL="⚠️**<secrets.target_relative_path>**"
+MIGRATION_MODE="⚠️**<migration.mode>**"
+JOURNAL="⚠️**<journal.path>**"
+PG_KIND="⚠️**<database.pgdata.kind>**"
+PG_SRC="⚠️**<database.pgdata.source>**"
+SOURCE_SSH_PORT="⚠️**<source.ssh.port>**"
+SOURCE_SSH_USER="⚠️**<source.ssh.user>**"
+SOURCE_SSH_HOST="⚠️**<source.ssh.host>**"
 
-for v in TARGET_PROJECT_DIR SECRETS_SRC SECRETS_REL; do
+for v in TARGET_PROJECT_DIR SECRETS_SRC SECRETS_REL MIGRATION_MODE JOURNAL PG_KIND PG_SRC; do
     val="${!v}"
     [[ -n "$val" && "$val" != *'⚠️'* && "$val" != *'<'* && "$val" != *'>'* && "$val" != *'['* && "$val" != *']'* && "$val" != *'**'* ]] \
-        || { echo "STOP: $v не подставлена: '$val'" >&2; exit 22; }
+        || { echo "STOP 4.3: $v не подставлена: '$val'" >&2; exit 22; }
 done
 
+case "$MIGRATION_MODE" in
+    update|initial) ;;
+    *) echo "STOP 4.3: MIGRATION_MODE='$MIGRATION_MODE' (ожидается update или initial)" >&2; exit 28 ;;
+esac
+
 TARGET_PROJECT_DIR="${TARGET_PROJECT_DIR%/}"
-SECRETS_REL="${SECRETS_REL#./}"
+norm() { local v="${1#./}"; printf '%s' "${v%/}"; }
+SECRETS_REL="$(norm "$SECRETS_REL")"
 case "$SECRETS_REL" in
-    ""|/*|*'..'*) echo "STOP: secrets.target_relative_path ($SECRETS_REL) должен быть относительным путём внутри target.project_dir без '..' и ведущего '/'" >&2; exit 23 ;;
+    ""|/*|*'..'*) echo "STOP 4.3: secrets.target_relative_path ($SECRETS_REL) должен быть относительным путём внутри target.project_dir без '..' и ведущего '/'" >&2; exit 23 ;;
 esac
 SECRETS_DST="${TARGET_PROJECT_DIR}/${SECRETS_REL}"
+if [[ "$PG_KIND" == "bind" && "$PG_SRC" != /* ]]; then
+    PG_REL="$(norm "$PG_SRC")"
+    case "$SECRETS_REL" in
+        "$PG_REL"|"$PG_REL"/*)
+            echo "STOP 4.3: secrets.target_relative_path ($SECRETS_REL) не может находиться внутри database.pgdata.source ($PG_REL) (каталог исключён из бэкапа)" >&2
+            exit 23 ;;
+    esac
+fi
+
+if [[ "$MIGRATION_MODE" == "update" && -f "$SECRETS_DST" ]]; then
+    BACKUP="$(awk -F'\t' '
+        $1=="3.1" && $3=="ok" {
+            r=""; b="";
+            for(i=4;i<=NF;i++) {
+                if($i~/^run_id=/) {sub(/^run_id=/,"",$i); r=$i}
+                if($i~/^backup=/) {sub(/^backup=/,"",$i); b=$i}
+            }
+            if(r!="" && b!="") { f[r]=b; last_r=r }
+        }
+        $1=="3.2.3" && $3=="ok" {
+            for(i=4;i<=NF;i++) if($i~/^run_id=/) {sub(/^run_id=/,"",$i); if($i in f) valid_r=$i}
+        }
+        END { if(valid_r!="" && valid_r==last_r) print f[valid_r] }
+    ' "$JOURNAL" 2>/dev/null || true)"
+
+    [[ -n "$BACKUP" && -d "$BACKUP" ]] \
+        || { echo "STOP 4.3: mode=update и $SECRETS_REL существует, но в $JOURNAL не найдена подтверждённая пара (3.1+3.2.3) с валидным каталогом отката" >&2; exit 24; }
+    [[ -f "$BACKUP/$SECRETS_REL" ]] \
+        || { echo "STOP 4.3: файл $SECRETS_REL существует, но отсутствует в бэкапе $BACKUP. Перезапись запрещена для защиты от потери старых секретов." >&2; exit 25; }
+fi
+
 mkdir -p -- "$(dirname -- "$SECRETS_DST")"
 
-rsync -avz -e "ssh -p ⚠️**<source.ssh.port>**" "⚠️**<source.ssh.user>**@⚠️**<source.ssh.host>**:$SECRETS_SRC" "$SECRETS_DST"
+rsync -avz -e "ssh -p $SOURCE_SSH_PORT" "$SOURCE_SSH_USER"@"$SOURCE_SSH_HOST":"$SECRETS_SRC" "$SECRETS_DST"
 chmod 0600 "$SECRETS_DST"
 )
 ```
@@ -1230,8 +1573,15 @@ chmod 0600 "$SECRETS_DST"
 
 **Проверка совместимости образа СУБД доставленной конфигурации:** зафиксировать целевой тег образа PostgreSQL после доставки `docker-compose.yml` и `.env` — при `database.mode = restore` мажорная версия должна быть не ниже исходной (зафиксированной в 2.13); при `database.mode = keep` мажорная версия должна строго совпадать с версией целевого сервера (зафиксированной в 2.6 и 3.2.2).
 
+**Проверка совместимости образа СУБД доставленной конфигурации:** зафиксировать целевой тег образа PostgreSQL после доставки `docker-compose.yml` и `.env`:
+- при `database.mode = restore`: мажорная версия должна быть не ниже исходной (зафиксированной в 2.13);
+- при `database.mode = keep` (допустимо только при `migration.mode = update`): мажорная версия должна строго совпадать с текущей версией целевого сервера (зафиксированной в 2.6 и 3.2.2);
+- при `database.mode = fresh`: версия определяется исключительно доставленным `docker-compose.yml`, так как том создается с нуля.
+
 ```bash
-cd ⚠️**<target.project_dir>**
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+
+cd "$TARGET_PROJECT_DIR"
 docker compose config --images | grep -i postgres
 ```
 ### 4.4. Доставка и подготовка Docker-образов
@@ -1243,7 +1593,9 @@ docker compose config --images | grep -i postgres
 **Место выполнения:** целевой сервер, Bash.
 
 ```bash
-cd ⚠️**<target.project_dir>**
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+
+cd "$TARGET_PROJECT_DIR"
 docker compose pull
 docker compose build
 ```
@@ -1255,7 +1607,9 @@ docker compose build
 **Место 1 (исходный сервер):**
 
 ```bash
-cd ⚠️**<source.project_dir>**
+SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
+
+cd "$SOURCE_PROJECT_DIR"
 docker compose build
 docker compose push
 ```
@@ -1263,7 +1617,9 @@ docker compose push
 **Место 2 (целевой сервер):**
 
 ```bash
-cd ⚠️**<target.project_dir>**
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+
+cd "$TARGET_PROJECT_DIR"
 # При необходимости авторизации в закрытом Registry предварительно выполните: docker login
 docker compose pull
 ```
@@ -1279,7 +1635,9 @@ docker compose pull
 set -Eeuo pipefail
 trap 'rc=$?; echo "FAIL 4.4.B/source rc=$rc line=$LINENO" >&2' ERR
 
-cd ⚠️**<source.project_dir>**
+SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
+
+cd "$SOURCE_PROJECT_DIR"
 
 mapfile -t TRANSFER_IMAGES < <(docker compose config --images | sort -u)
 ((${#TRANSFER_IMAGES[@]} > 0)) \
@@ -1294,9 +1652,9 @@ for image in "${TRANSFER_IMAGES[@]}"; do
         || { echo "STOP: после сборки отсутствует образ '$image'" >&2; exit 27; }
 done
 
-docker save -o ⚠️**<source.project_dir>**/compose_images.tar "${TRANSFER_IMAGES[@]}"
-printf '%s\n' "${TRANSFER_IMAGES[@]}" > ⚠️**<source.project_dir>**/compose_images.tar.images
-[[ -s ⚠️**<source.project_dir>**/compose_images.tar && -s ⚠️**<source.project_dir>**/compose_images.tar.images ]] \
+docker save -o /tmp/compose_images.tar "${TRANSFER_IMAGES[@]}"
+printf '%s\n' "${TRANSFER_IMAGES[@]}" > /tmp/compose_images.tar.images
+[[ -s /tmp/compose_images.tar && -s /tmp/compose_images.tar.images ]] \
     || { echo "STOP: архив образов или список образов не создан" >&2; exit 24; }
 )
 ```
@@ -1308,17 +1666,23 @@ printf '%s\n' "${TRANSFER_IMAGES[@]}" > ⚠️**<source.project_dir>**/compose_i
 set -Eeuo pipefail
 trap 'rc=$?; echo "FAIL 4.4.B/target rc=$rc line=$LINENO" >&2' ERR
 
-cd ⚠️**<target.project_dir>**
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+ROLLBACK_DIR=⚠️**<journal.rollback_dir>**
+SOURCE_SSH_PORT=⚠️**<source.ssh.port>**
+SOURCE_SSH_USER=⚠️**<source.ssh.user>**
+SOURCE_SSH_HOST=⚠️**<source.ssh.host>**
 
-rsync -avP -e "ssh -p ⚠️**<source.ssh.port>**" \
-    ⚠️**<source.ssh.user>**@⚠️**<source.ssh.host>**:⚠️**<source.project_dir>**/compose_images.tar \
-    ⚠️**<source.ssh.user>**@⚠️**<source.ssh.host>**:⚠️**<source.project_dir>**/compose_images.tar.images \
-    ⚠️**<journal.rollback_dir>**/
+cd "$TARGET_PROJECT_DIR"
 
-[[ -s ⚠️**<journal.rollback_dir>**/compose_images.tar && -s ⚠️**<journal.rollback_dir>**/compose_images.tar.images ]] \
+rsync -avP -e "ssh -p $SOURCE_SSH_PORT" \
+    "$SOURCE_SSH_USER"@"$SOURCE_SSH_HOST":/tmp/compose_images.tar \
+    "$SOURCE_SSH_USER"@"$SOURCE_SSH_HOST":/tmp/compose_images.tar.images \
+    "$ROLLBACK_DIR"/
+
+[[ -s "$ROLLBACK_DIR"/compose_images.tar && -s "$ROLLBACK_DIR"/compose_images.tar.images ]] \
     || { echo "STOP: архив образов или список образов не доставлен" >&2; exit 24; }
 
-docker load -i ⚠️**<journal.rollback_dir>**/compose_images.tar
+docker load -i "$ROLLBACK_DIR"/compose_images.tar
 
 mapfile -t TARGET_IMAGES < <(docker compose config --images | sort -u)
 ((${#TARGET_IMAGES[@]} > 0)) \
@@ -1330,14 +1694,14 @@ for image in "${TARGET_IMAGES[@]}"; do
         || { echo "STOP: после загрузки отсутствует целевой образ '$image'" >&2; exit 27; }
 done
 
-rm -f ⚠️**<journal.rollback_dir>**/compose_images.tar ⚠️**<journal.rollback_dir>**/compose_images.tar.images
+rm -f "$ROLLBACK_DIR"/compose_images.tar "$ROLLBACK_DIR"/compose_images.tar.images
 )
 ```
 
 **Место 3 (исходный сервер):**
 
 ```bash
-rm -f ⚠️**<source.project_dir>**/compose_images.tar ⚠️**<source.project_dir>**/compose_images.tar.images
+rm -f /tmp/compose_images.tar /tmp/compose_images.tar.images
 ```
 
 **Ожидаемый результат:** Все образы Compose-проекта перенесены, загружены и проверены в локальном хранилище Docker на целевом сервере.
@@ -1354,7 +1718,7 @@ rm -f ⚠️**<source.project_dir>**/compose_images.tar ⚠️**<source.project_
 
 #### 5.1.1. Остановка внешних источников записи на уровне ОС
 
-Остановите все хостовые источники записи (`cron`, `systemd`-таймеры, внешние сервисы), выявленные на шаге 2.8 и перечисленные в "Журнале оператора":
+Остановите все хостовые источники записи (`cron`, `systemd`-таймеры, внешние сервисы) и заблокируйте доступ внешних клиентов СУБД (`external-db-client` из 2.8), выявленных на шаге 2.8 и перечисленных в "Журнале оператора". Блокировка — firewall, `pg_hba.conf` или остановка внешних хостов. `pg_terminate_backend` в 5.1.2 — однократный сброс; без блокировки внешний клиент переподключится и будет писать во время 5.2:
 
 ```bash
 # Остановить все внешние таймеры/сервисы проекта, зафиксированные в 2.8:
@@ -1368,20 +1732,25 @@ systemctl list-timers --all --no-pager
 #### 5.1.2. Остановка контейнеров приложения и сброс соединений СУБД
 
 ```bash
-cd ⚠️**<source.project_dir>**
+SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
+DB_SERVICE=⚠️**<database.service>**
+DB_USER=⚠️**<database.environment_keys.user>**
+DB_NAME=⚠️**<database.environment_keys.name>**
+
+cd "$SOURCE_PROJECT_DIR"
 docker compose stop
-docker compose start ⚠️**<database.service>**
+docker compose start "$DB_SERVICE"
 
 # Дождаться готовности СУБД после запуска контейнера:
 for _ in $(seq 1 30); do
-    docker compose exec -T ⚠️**<database.service>** sh -c 'pg_isready -h 127.0.0.1 -U "$⚠️**<database.environment_keys.user>**" -d "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}" -q' && break
+    docker compose exec -T "$DB_SERVICE" sh -c "pg_isready -h 127.0.0.1 -U \"\$$DB_USER\" -d \"\${$DB_NAME:-\$$DB_USER}\" -q" && break
     sleep 1
 done
-docker compose exec -T ⚠️**<database.service>** sh -c 'pg_isready -h 127.0.0.1 -U "$⚠️**<database.environment_keys.user>**" -d "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}" -q' \
+docker compose exec -T "$DB_SERVICE" sh -c "pg_isready -h 127.0.0.1 -U \"\$$DB_USER\" -d \"\${$DB_NAME:-\$$DB_USER}\" -q" \
     || { echo "STOP: СУБД не принимает соединения" >&2; exit 1; }
 
 # Сбросить внешние подключения к БД (если обнаружены в 2.8), чтобы изолировать дамп:
-docker compose exec -T ⚠️**<database.service>** sh -c 'psql -U "$⚠️**<database.environment_keys.user>**" -d "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}" -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database();"'
+docker compose exec -T "$DB_SERVICE" sh -c "psql -U \"\$$DB_USER\" -d \"\${$DB_NAME:-\$$DB_USER}\" -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database();\""
 ```
 
 **Ожидаемый результат:** Источники записи остановлены. Контейнер СУБД продолжает работать.
@@ -1394,7 +1763,7 @@ docker compose exec -T ⚠️**<database.service>** sh -c 'psql -U "$⚠️**<da
 
 #### 5.1.Б.1. Остановка внешних и фоновых источников записи
 
-HTTP-режим обслуживания блокирует только веб-запросы. До включения режима обслуживания остановите все хостовые планировщики (`cron`, `systemd`-таймеры) и фоновые воркеры, выявленные на шаге 2.8 и перечисленные в "Журнале оператора":
+HTTP-режим обслуживания блокирует только веб-запросы. До включения режима обслуживания остановите все хостовые планировщики (`cron`, `systemd`-таймеры) и фоновые воркеры, а также заблокируйте доступ внешних клиентов СУБД (`external-db-client` из 2.8), выявленных на шаге 2.8 и перечисленных в "Журнале оператора". Блокировка — firewall, `pg_hba.conf` или остановка внешних хостов. В Варианте Б `pg_terminate_backend` не выполняется; без блокировки внешний писатель сделает барьер 5.1.Б.2 непроходимым (транзакции не завершатся) либо (при коротких транзакциях) проскочит между барьером и 5.2:
 
  ```bash
 # Остановить внешние таймеры/сервисы проекта на уровне ОС (при наличии):
@@ -1408,15 +1777,32 @@ systemctl list-timers --all --no-pager
 ```bash
 (
 set -Eeuo pipefail
-cd ⚠️**<source.project_dir>**
 
-docker compose exec -T ⚠️**<application.service>** python manage.py help set_maintenance_mode >/dev/null 2>&1 \
+SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
+APP_SERVICE=⚠️**<application.service>**
+DB_SERVICE=⚠️**<database.service>**
+DB_USER=⚠️**<database.environment_keys.user>**
+DB_NAME=⚠️**<database.environment_keys.name>**
+
+cd "$SOURCE_PROJECT_DIR"
+
+docker compose exec -T "$APP_SERVICE" python manage.py help set_maintenance_mode >/dev/null 2>&1 \
     || { echo "STOP: команда set_maintenance_mode не реализована в приложении. Используйте capture_method=stop_writers (Вариант А)" >&2; exit 1; }
 
-docker compose exec -T ⚠️**<application.service>** python manage.py set_maintenance_mode on
+docker compose exec -T "$APP_SERVICE" python manage.py set_maintenance_mode on
 
 # Проверка отсутствия активных пишущих транзакций после включения режима обслуживания:
-docker compose exec -T ⚠️**<database.service>** sh -c 'psql -U "$⚠️**<database.environment_keys.user>**" -d "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}" -c "SELECT pid, usename, state, left(query,60) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database() AND state <> '\''idle'\'';"'
+# Проверка отсутствия активных транзакций после включения режима обслуживания.
+# state <> 'idle' включает и чтения (active), и открытые транзакции (idle in transaction).
+# Барьер согласован с 5.1.2 (pg_terminate_backend также убивает всё state <> 'idle').
+ACTIVE_TX="$(docker compose exec -T "$DB_SERVICE" sh -c "psql -X -A -t -U \"\$$DB_USER\" -d \"\${$DB_NAME:-\$$DB_USER}\" -c \"SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database() AND state <> 'idle';\"")"
+
+if [[ "$ACTIVE_TX" -gt 0 ]]; then
+    echo "STOP 5.1.Б.2: обнаружено $ACTIVE_TX транзакций с state <> 'idle' (включая чтения и idle in transaction)." >&2
+    docker compose exec -T "$DB_SERVICE" sh -c "psql -U \"\$$DB_USER\" -d \"\${$DB_NAME:-\$$DB_USER}\" -c \"SELECT pid, usename, state, left(query,60) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database() AND state <> 'idle';\"" >&2
+    echo "Дождитесь завершения транзакций и перезапустите 5.1.Б.2, либо перейдите к Варианту А (stop_writers)." >&2
+    exit 32
+fi
 )
 ```
 
@@ -1435,10 +1821,16 @@ docker compose exec -T ⚠️**<database.service>** sh -c 'psql -U "$⚠️**<da
 ```bash
 (
 set -Eeuo pipefail
-cd ⚠️**<source.project_dir>**
-DUMP_FILE="db_dump_$(date +%Y%m%d_%H%M%S).dump"
+SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
+DB_SERVICE=⚠️**<database.service>**
+DB_USER=⚠️**<database.environment_keys.user>**
+DB_NAME=⚠️**<database.environment_keys.name>**
 
-docker compose exec -T ⚠️**<database.service>** sh -c 'pg_dump -U "$⚠️**<database.environment_keys.user>**" -d "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}" -Fc -Z 6 --no-owner --no-acl' > "$DUMP_FILE"
+cd "$SOURCE_PROJECT_DIR"
+
+DUMP_FILE="/tmp/db_dump_$(date +%Y%m%d_%H%M%S).dump"
+
+docker compose exec -T "$DB_SERVICE" sh -c "pg_dump -U \"\$$DB_USER\" -d \"\${$DB_NAME:-\$$DB_USER}\" -Fc -Z 6 --no-owner --no-acl" > "$DUMP_FILE"
 
 echo ""
 echo "ИМЯ ФАЙЛА ДАМПА ДЛЯ ШАГА 5.3.1:"
@@ -1461,20 +1853,27 @@ ls -lh "$DUMP_FILE"
 (
 set -Eeuo pipefail
 trap 'rc=$?; echo "FAIL 5.3.1 rc=$rc line=$LINENO" >&2' ERR    
-cd ⚠️**<target.project_dir>**
 
-DUMP_FILE="⚠️**<dump_file_name_from_step_5.2>**"
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+ROLLBACK_DIR=⚠️**<journal.rollback_dir>**
+SOURCE_SSH_PORT=⚠️**<source.ssh.port>**
+SOURCE_SSH_USER=⚠️**<source.ssh.user>**
+SOURCE_SSH_HOST=⚠️**<source.ssh.host>**
+
+cd "$TARGET_PROJECT_DIR"
+
+DUMP_FILE=⚠️**<dump_file_path_from_step_5.2>**
 
 [[ -n "$DUMP_FILE" && "$DUMP_FILE" != *'⚠️'* && "$DUMP_FILE" != *'<'* && "$DUMP_FILE" != *'>'* && "$DUMP_FILE" != *'['* && "$DUMP_FILE" != *']'* && "$DUMP_FILE" != *'**'* ]] \
-    || { echo "STOP: Имя файла дампа не подставлено: '$DUMP_FILE'" >&2; exit 22; }
-echo "$DUMP_FILE" > ⚠️**<journal.rollback_dir>**/latest_db_dump.name
+    || { echo "STOP: Путь файла дампа не подставлен: '$DUMP_FILE'" >&2; exit 22; }
+echo "$(basename "$DUMP_FILE")" > "$ROLLBACK_DIR"/migration_source_dump.name
 
-rsync -avP -e "ssh -p ⚠️**<source.ssh.port>**" ⚠️**<source.ssh.user>**@⚠️**<source.ssh.host>**:⚠️**<source.project_dir>**/"$DUMP_FILE" ⚠️**<journal.rollback_dir>**/
+rsync -avP -e "ssh -p $SOURCE_SSH_PORT" "$SOURCE_SSH_USER"@"$SOURCE_SSH_HOST":"$DUMP_FILE" "$ROLLBACK_DIR"/
 
-[[ -s "⚠️**<journal.rollback_dir>**/$DUMP_FILE" ]] || { echo "STOP: доставленный дамп ⚠️**<journal.rollback_dir>**/$DUMP_FILE пуст или отсутствует" >&2; exit 23; }
+[[ -s "$ROLLBACK_DIR/$(basename "$DUMP_FILE")" ]] || { echo "STOP: доставленный дамп пуст или отсутствует" >&2; exit 23; }
 
 # Очистка временного дампа на исходном сервере после успешного копирования
-ssh -p ⚠️**<source.ssh.port>** -o BatchMode=yes ⚠️**<source.ssh.user>**@⚠️**<source.ssh.host>** "rm -f ⚠️**<source.project_dir>**/'$DUMP_FILE'"
+ssh -p "$SOURCE_SSH_PORT" -o BatchMode=yes "$SOURCE_SSH_USER"@"$SOURCE_SSH_HOST" "rm -f '$DUMP_FILE'"
 )
 ```
 
@@ -1485,12 +1884,21 @@ ssh -p ⚠️**<source.ssh.port>** -o BatchMode=yes ⚠️**<source.ssh.user>**@
 (
 set -Eeuo pipefail
 trap 'rc=$?; echo "FAIL 5.3.2 rc=$rc line=$LINENO" >&2' ERR    
-cd ⚠️**<target.project_dir>**
+
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
+SOURCE_SSH_PORT=⚠️**<source.ssh.port>**
+SOURCE_SSH_USER=⚠️**<source.ssh.user>**
+SOURCE_SSH_HOST=⚠️**<source.ssh.host>**
+SOURCE_STORAGE_1=⚠️**<storage.items[0].source_relative_path>**
+TARGET_STORAGE_1=⚠️**<storage.items[0].target_relative_path>**
+
+cd "$TARGET_PROJECT_DIR"
 # Копирование файловых хранилищ (выполнить для каждого каталога из storage.items с transfer=true)
 # Пример для каталога storage/cache:
-mkdir -p ⚠️**<storage.items[*].target_relative_path>**
-sudo chown -R "$(id -un):$(id -gn)" ⚠️**<storage.items[*].target_relative_path>**
-rsync -avP --delete --rsync-path="sudo -k -n rsync" -e "ssh -p ⚠️**<source.ssh.port>**" ⚠️**<source.ssh.user>**@⚠️**<source.ssh.host>**:⚠️**<source.project_dir>**/⚠️**<storage.items[*].source_relative_path>**/ ⚠️**<storage.items[*].target_relative_path>**/
+mkdir -p "$TARGET_STORAGE_1"
+sudo chown -R "$(id -un):$(id -gn)" "$TARGET_STORAGE_1"
+rsync -avP --delete --rsync-path="sudo -k -n rsync" -e "ssh -p $SOURCE_SSH_PORT" "$SOURCE_SSH_USER"@"$SOURCE_SSH_HOST":"$SOURCE_PROJECT_DIR"/"$SOURCE_STORAGE_1"/ "$TARGET_STORAGE_1"/
 )
 ```
 
@@ -1505,11 +1913,16 @@ rsync -avP --delete --rsync-path="sudo -k -n rsync" -e "ssh -p ⚠️**<source.s
 *(Внимание: для корректного резервирования в 3.1 и отката в 8.2 все пути `target_relative_path` должны располагаться строго внутри директории `target.project_dir`. Внешние docker-тома или пути вне проекта текущей процедурой отката не покрываются)*
 
 ```bash
-cd ⚠️**<target.project_dir>**
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+TARGET_STORAGE_1=⚠️**<storage.items[0].target_relative_path>**
+STORAGE_UID_1=⚠️**<storage.items[0].uid>**
+STORAGE_GID_1=⚠️**<storage.items[0].gid>**
+
+cd "$TARGET_PROJECT_DIR"
 
 # Выполнить команду для каждого каталога из списка storage.items:
-mkdir -p ⚠️**<storage.items[*].target_relative_path>**
-sudo chown -R ⚠️**<storage.items[*].uid>**:⚠️**<storage.items[*].gid>** ⚠️**<storage.items[*].target_relative_path>**
+mkdir -p "$TARGET_STORAGE_1"
+sudo chown -R "$STORAGE_UID_1":"$STORAGE_GID_1" "$TARGET_STORAGE_1"
 ```
 
 **Ожидаемый результат:** Права на целевые директории хранилищ изменены для корректного доступа на запись изнутри контейнеров приложения.
@@ -1525,24 +1938,30 @@ sudo chown -R ⚠️**<storage.items[*].uid>**:⚠️**<storage.items[*].gid>** 
 ```bash
 (
 set -Eeuo pipefail    
-cd ⚠️**<target.project_dir>**
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+ROLLBACK_DIR=⚠️**<journal.rollback_dir>**
+DB_SERVICE=⚠️**<database.service>**
+DB_USER=⚠️**<database.environment_keys.user>**
+DB_NAME=⚠️**<database.environment_keys.name>**
+
+cd "$TARGET_PROJECT_DIR"
 
 # Проверка наличия файла дампа до запуска/пересоздания тома СУБД:
-[[ -f ⚠️**<journal.rollback_dir>**/latest_db_dump.name ]] || { echo "STOP: Файл-указатель ⚠️**<journal.rollback_dir>**/latest_db_dump.name не найден" >&2; exit 1; }
-DUMP_FILE=$(cat ⚠️**<journal.rollback_dir>**/latest_db_dump.name)
-[[ -f "⚠️**<journal.rollback_dir>**/$DUMP_FILE" ]] || { echo "STOP: Дамп ⚠️**<journal.rollback_dir>**/$DUMP_FILE не найден" >&2; exit 1; }
+[[ -f "$ROLLBACK_DIR"/migration_source_dump.name ]] || { echo "STOP: Файл-указатель "$ROLLBACK_DIR"/migration_source_dump.name не найден" >&2; exit 1; }
+DUMP_FILE=$(cat "$ROLLBACK_DIR"/migration_source_dump.name)
+[[ -f "$ROLLBACK_DIR/$DUMP_FILE" ]] || { echo "STOP: Дамп "$ROLLBACK_DIR"/$DUMP_FILE не найден" >&2; exit 1; }
 
-docker compose up -d ⚠️**<database.service>**
+docker compose up -d "$DB_SERVICE"
 
 # Дождаться TCP-готовности: временный сервер initdb работает только через Unix-сокет.
 # Исчерпание попыток не подтверждает конфликт версий и не разрешает удаление тома.
 for _ in $(seq 1 120); do
-    docker compose exec -T ⚠️**<database.service>** sh -c 'pg_isready -h 127.0.0.1 -U "$⚠️**<database.environment_keys.user>**" -d "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}" -q' 2>/dev/null && break
+    docker compose exec -T "$DB_SERVICE" sh -c "pg_isready -h 127.0.0.1 -U \"\$$DB_USER\" -d \"\${$DB_NAME:-\$$DB_USER}\" -q" 2>/dev/null && break
     sleep 1
 done
-if ! docker compose exec -T ⚠️**<database.service>** sh -c 'pg_isready -h 127.0.0.1 -U "$⚠️**<database.environment_keys.user>**" -d "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}" -q' 2>/dev/null; then
-    docker compose ps -a ⚠️**<database.service>** >&2 || true
-    docker compose logs --no-color --tail=100 ⚠️**<database.service>** >&2 || true
+if ! docker compose exec -T "$DB_SERVICE" sh -c "pg_isready -h 127.0.0.1 -U \"\$$DB_USER\" -d \"\${$DB_NAME:-\$$DB_USER}\" -q" 2>/dev/null; then
+    docker compose ps -a "$DB_SERVICE" >&2 || true
+    docker compose logs --no-color --tail=100 "$DB_SERVICE" >&2 || true
     echo "STOP: СУБД пока не принимает TCP-соединения. Контейнер и тома сохранены." >&2
     echo "Проверить логи: конфликт версий подтверждается сообщением PostgreSQL 'database files are incompatible with server' и DETAIL с версиями." >&2
     echo "Инициализация и docker-entrypoint-initdb.d могут занимать минуты; если они продолжаются — дождаться завершения и повторить 6.2 (Вариант А)." >&2
@@ -1550,15 +1969,16 @@ if ! docker compose exec -T ⚠️**<database.service>** sh -c 'pg_isready -h 12
     exit 1
 fi
 
-docker compose exec -T ⚠️**<database.service>** pg_restore -l < "⚠️**<journal.rollback_dir>**/$DUMP_FILE" >/dev/null \
-    || { echo "STOP: Архив дампа ⚠️**<journal.rollback_dir>**/$DUMP_FILE повреждён" >&2; exit 1; }
+docker compose exec -T "$DB_SERVICE" pg_restore -l < "$ROLLBACK_DIR/$DUMP_FILE" >/dev/null \
+    || { echo "STOP: Архив дампа "$ROLLBACK_DIR"/$DUMP_FILE повреждён" >&2; exit 1; }
 
 # Очистка целевой БД перед восстановлением (гарантия идемпотентности):
-docker compose exec -T ⚠️**<database.service>** sh -c 'dropdb --maintenance-db=template1 -U "$⚠️**<database.environment_keys.user>**" --if-exists --force "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}"'
-docker compose exec -T ⚠️**<database.service>** sh -c 'createdb --maintenance-db=template1 -T template0 -U "$⚠️**<database.environment_keys.user>**" -O "$⚠️**<database.environment_keys.user>**" "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}"'
+docker compose exec -T "$DB_SERVICE" sh -c "dropdb --maintenance-db=template1 -U \"\$$DB_USER\" --if-exists --force \"\${$DB_NAME:-\$$DB_USER}\""
+docker compose exec -T "$DB_SERVICE" sh -c "createdb --maintenance-db=template1 -T template0 -U \"\$$DB_USER\" -O \"\$$DB_USER\" \"\${$DB_NAME:-\$$DB_USER}\""
 
 # Восстановление дампа (строгая остановка при первой ошибке):
-docker compose exec -T ⚠️**<database.service>** sh -c 'pg_restore -U "$⚠️**<database.environment_keys.user>**" -d "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}" --clean --if-exists --no-owner --no-acl --exit-on-error -1' < "⚠️**<journal.rollback_dir>**/$DUMP_FILE"
+docker compose exec -T "$DB_SERVICE" sh -c "pg_restore -U \"\$$DB_USER\" -d \"\${$DB_NAME:-\$$DB_USER}\" --clean --if-exists --no-owner --no-acl --exit-on-error -1" < "$ROLLBACK_DIR/$DUMP_FILE"
+)
 ```
 
 **Ожидаемый результат:** Контейнер СУБД запущен. Логический дамп успешно развернут без критических ошибок.
@@ -1568,14 +1988,19 @@ docker compose exec -T ⚠️**<database.service>** sh -c 'pg_restore -U "$⚠�
 **Место выполнения:** целевой сервер, Bash.
 
 ```bash
-cd ⚠️**<target.project_dir>**
-docker compose up -d ⚠️**<database.service>**
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+DB_SERVICE=⚠️**<database.service>**
+DB_USER=⚠️**<database.environment_keys.user>**
+DB_NAME=⚠️**<database.environment_keys.name>**
+
+cd "$TARGET_PROJECT_DIR"
+docker compose up -d "$DB_SERVICE"
 
 for _ in $(seq 1 30); do
-    docker compose exec -T ⚠️**<database.service>** sh -c 'pg_isready -h 127.0.0.1 -U "$⚠️**<database.environment_keys.user>**" -d "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}" -q' && break
+    docker compose exec -T "$DB_SERVICE" sh -c "pg_isready -h 127.0.0.1 -U \"\$$DB_USER\" -d \"\${$DB_NAME:-\$$DB_USER}\" -q" && break
     sleep 1
 done
-docker compose exec -T ⚠️**<database.service>** sh -c 'pg_isready -h 127.0.0.1 -U "$⚠️**<database.environment_keys.user>**" -d "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}" -q' \
+docker compose exec -T "$DB_SERVICE" sh -c "pg_isready -h 127.0.0.1 -U \"\$$DB_USER\" -d \"\${$DB_NAME:-\$$DB_USER}\" -q" \
     || { echo "STOP: СУБД не принимает соединения" >&2; exit 1; }
 ```
 
@@ -1590,22 +2015,32 @@ docker compose exec -T ⚠️**<database.service>** sh -c 'pg_isready -h 127.0.0
 ```bash
 (
 set -Eeuo pipefail
-cd ⚠️**<target.project_dir>**
 
-if [[ -f "⚠️**<journal.rollback_dir>**/rollback_point.env" ]]; then
-    . "⚠️**<journal.rollback_dir>**/rollback_point.env"
-    DST_PG="$(docker compose run --rm --no-deps --entrypoint postgres ⚠️**<database.service>** --version | sed -E 's/^[^0-9]*([0-9]+).*/\1/')"
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+ROLLBACK_DIR=⚠️**<journal.rollback_dir>**
+DB_SERVICE=⚠️**<database.service>**
+DB_USER=⚠️**<database.environment_keys.user>**
+DB_NAME=⚠️**<database.environment_keys.name>**
+
+cd "$TARGET_PROJECT_DIR"
+
+if [[ -f "$ROLLBACK_DIR/rollback_point.env" ]]; then
+    . "$ROLLBACK_DIR/rollback_point.env"
+    # -T: без TTY (иначе CRLF в выводе и TTY-ошибка в неинтерактивной среде).
+    # tr -d '\r': страховка от trailing CR, если -T будет потерян при правке.
+    DST_PG="$(docker compose run -T --rm --no-deps --entrypoint postgres "$DB_SERVICE" --version \
+        | tr -d '\r' | sed -E 's/^[^0-9]*([0-9]+).*/\1/')"
     [[ -z "${PG_MAJOR:-}" || "$DST_PG" == "$PG_MAJOR" ]] \
         || { echo "STOP: при database.mode=keep смена мажорной версии PG ($PG_MAJOR -> $DST_PG) запрещена (несовместимость PGDATA)" >&2; exit 1; }
 fi
 
-docker compose up -d ⚠️**<database.service>**
+docker compose up -d "$DB_SERVICE"
 
 for _ in $(seq 1 30); do
-    docker compose exec -T ⚠️**<database.service>** sh -c 'pg_isready -h 127.0.0.1 -U "$⚠️**<database.environment_keys.user>**" -d "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}" -q' 2>/dev/null && break
+    docker compose exec -T "$DB_SERVICE" sh -c "pg_isready -h 127.0.0.1 -U \"\$$DB_USER\" -d \"\${$DB_NAME:-\$$DB_USER}\" -q" 2>/dev/null && break
     sleep 1
 done
-docker compose exec -T ⚠️**<database.service>** sh -c 'pg_isready -h 127.0.0.1 -U "$⚠️**<database.environment_keys.user>**" -d "${⚠️**<database.environment_keys.name>**:-$⚠️**<database.environment_keys.user>**}" -q' \
+docker compose exec -T "$DB_SERVICE" sh -c "pg_isready -h 127.0.0.1 -U \"\$$DB_USER\" -d \"\${$DB_NAME:-\$$DB_USER}\" -q" \
     || { echo "STOP: СУБД не принимает соединения" >&2; exit 1; }
 )
 ```
@@ -1647,15 +2082,32 @@ if [[ "$PG_KIND" == "bind" ]]; then
     else
         MNT_PATH="${TARGET_DIR}/${PG_SRC}"
     fi
-    sudo rm -rf -- "${MNT_PATH:?}"/*
+    sudo find "${MNT_PATH:?}" -mindepth 1 -delete
     echo "Очищена bind-директория: $MNT_PATH"
 elif [[ "$PG_KIND" == "volume" ]]; then
-    VOL_NAME="$(docker volume ls -q --filter "label=com.docker.compose.project.working_dir=$TARGET_DIR" --filter "label=com.docker.compose.volume=$PG_SRC" || true)"
+    PROJ="$(docker compose config | awk '/^name:/ {print $2}')"
+    VOL_NAME="$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJ" --filter "label=com.docker.compose.volume=$PG_SRC" || true)"
+    # Fallback 1: PG_SRC задан полным именем (external: true, ручной volume create).
+        if [[ -z "$VOL_NAME" ]] && docker volume inspect "$PG_SRC" >/dev/null 2>&1; then
+            VOL_NAME="$PG_SRC"
+        fi
+        # Fallback 2: PG_SRC — логическое имя, но label-filter не сработал (иной project/подмена compose-файла).
+        if [[ -z "$VOL_NAME" && -n "$PROJ" ]] && docker volume inspect "${PROJ}_${PG_SRC}" >/dev/null 2>&1; then
+            VOL_NAME="${PROJ}_${PG_SRC}"
+        fi
     if [[ -n "$VOL_NAME" ]]; then
-        docker volume rm -f "$VOL_NAME" >/dev/null || true
+        docker volume rm -f "$VOL_NAME" >/dev/null \
+            || { echo "STOP: не удалось удалить том $VOL_NAME" >&2; exit 32; }
+        docker volume inspect "$VOL_NAME" >/dev/null 2>&1 \
+            && { echo "STOP: том $VOL_NAME всё ещё существует после rm -f" >&2; exit 32; }
         echo "Удален том: $VOL_NAME"
     else
-        echo "WARN: Том $PG_SRC не найден (возможно, уже удален)" >&2
+        echo "STOP: Том $PG_SRC не найден для очистки" >&2
+        exit 1
+        # Не найден ни по одному способу: либо уже удалён (успешный предыдущий
+            # прогон 6.2.1, повтор 6.2 не требуется), либо PG_SRC указывает в никуда.
+            # Продолжаем: fresh-инициализация в up -d ниже — валидный путь recovery.
+            echo "WARN: том '$PG_SRC' не найден ни через labels, ни через inspect; продолжаем — up -d создаст пустой том. Если конфликт версий повторится, проверить docker volume ls | grep '$PG_SRC' и database.pgdata.source в YAML." >&2
     fi
 else
     echo "STOP: Неизвестный database.pgdata.kind: $PG_KIND" >&2
@@ -1686,7 +2138,9 @@ echo "ОК. Том пересоздан. Выполните скрипт шаг�
 **Место выполнения:** целевой сервер, Bash.
 
 ```bash
-cd ⚠️**<target.project_dir>**
+TARGET_DIR="⚠️**<target.project_dir>**"
+
+cd "$TARGET_DIR"
 docker compose up -d
 ```
 
@@ -1697,9 +2151,12 @@ docker compose up -d
 **Место выполнения:** целевой сервер, Bash.
 
 ```bash
-cd ⚠️**<target.project_dir>**
+TARGET_DIR="⚠️**<target.project_dir>**"
+APP_SERVICE=⚠️**<application.service>**
+
+cd "$TARGET_DIR"
 # Ручное применение миграций до запуска основного пула
-docker compose run --rm ⚠️**<application.service>** python manage.py migrate
+docker compose run -T --rm "$APP_SERVICE" python manage.py migrate
 
 # Запуск всех контейнеров проекта
 docker compose up -d
@@ -1714,13 +2171,16 @@ docker compose up -d
 **Место выполнения:** целевой сервер, Bash.
 
 ```bash
-cd ⚠️**<target.project_dir>**
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+APP_SERVICE=⚠️**<application.service>**
+
+cd "$TARGET_PROJECT_DIR"
 
 # Проверка, что все контейнеры находятся в статусе "Up" и не перезагружаются
 docker compose ps
 
 # Проверка отсутствия критических ошибок (Traceback, FATAL) при старте веб-сервера
-docker compose logs --tail=100 ⚠️**<application.service>**
+docker compose logs --tail=100 "$APP_SERVICE"
 ```
 
 **Ожидаемый результат:** Все сервисы запущены. В логах нет циклических перезагрузок (crashloop) или ошибок подключения к БД.
@@ -1748,13 +2208,19 @@ application:
 ```bash
 (
 set -Eeuo pipefail
-cd -- '⚠️**<target.project_dir>**'
+
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+APP_HOST=⚠️**<application.host>**
+HC_PUBLISHED_PORT=⚠️**<application.healthcheck.published_port>**
+HC_PATH=⚠️**<application.healthcheck.path>**
+
+cd -- "$TARGET_PROJECT_DIR"
 
 if ! STATUS="$(curl --silent --show-error --noproxy '*' \
     --connect-timeout 5 --max-time 10 \
-    -H 'Host: ⚠️**<application.host>**' \
+    -H "Host: $APP_HOST" \
     --output /dev/null --write-out '%{http_code}' \
-    'http://127.0.0.1:⚠️**<application.healthcheck.published_port>**⚠️**<application.healthcheck.path>**')"; then
+    "http://127.0.0.1:$HC_PUBLISHED_PORT$HC_PATH")"; then
     echo 'STOP: транспортная ошибка HTTP-проверки с хоста' >&2
     exit 70
 fi
@@ -1773,11 +2239,18 @@ echo 'OK 7.2'
 ```bash
 (
 set -Eeuo pipefail
-cd -- '⚠️**<target.project_dir>**'
 
-docker compose exec -T '⚠️**<application.service>**' python - \
-    'http://127.0.0.1:⚠️**<application.healthcheck.container_port>**⚠️**<application.healthcheck.path>**' \
-    '⚠️**<application.host>**' <<'PY'
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+APP_SERVICE=⚠️**<application.service>**
+APP_HOST=⚠️**<application.host>**
+HC_CONTAINER_PORT=⚠️**<application.healthcheck.container_port>**
+HC_PATH=⚠️**<application.healthcheck.path>**
+
+cd -- "$TARGET_PROJECT_DIR"
+
+docker compose exec -T "$APP_SERVICE" python - \
+    "http://127.0.0.1:$HC_CONTAINER_PORT$HC_PATH" \
+    "$APP_HOST" <<'PY'
 import sys
 import urllib.error
 import urllib.request
@@ -1824,8 +2297,10 @@ PY
 
 3. **Очистка транзитных артефактов:** Если на шаге 5.3.1 переносился дамп БД, удалите его после подтверждения работоспособности приложения:
 ```bash
-DUMP_FILE=$(cat ⚠️**<journal.rollback_dir>**/latest_db_dump.name 2>/dev/null || true)
-[[ -n "$DUMP_FILE" ]] && rm -f -- "⚠️**<journal.rollback_dir>**/$DUMP_FILE" ⚠️**<journal.rollback_dir>**/latest_db_dump.name
+ROLLBACK_DIR=⚠️**<journal.rollback_dir>**
+
+DUMP_FILE=$(cat "$ROLLBACK_DIR"/migration_source_dump.name 2>/dev/null || true)
+[[ -n "$DUMP_FILE" ]] && rm -f -- "$ROLLBACK_DIR/$DUMP_FILE" "$ROLLBACK_DIR"/migration_source_dump.name
 ```
 
 **Ожидаемый результат:** Целевой сервер полностью введён в строй и готов к переключению внешнего трафика.
@@ -1853,6 +2328,11 @@ DUMP_FILE=$(cat ⚠️**<journal.rollback_dir>**/latest_db_dump.name 2>/dev/null
 Если хотя бы одно условие не подтверждено, использовать основной блок ниже.
 
 ```bash
+cd /
+# cwd интерактивного шелла оператора — target.project_dir (с шага 2.7).
+# Ранний и основной откат initial удаляют TARGET_PROJECT_DIR внутри подоболочки;
+# без этого cd / родительский шелл останется в удалённом inode (getcwd: cannot
+# access parent directories). Для update команда безвредна.
 (
 set -Eeuo pipefail
 MIGRATION_MODE="⚠️**<migration.mode>**"
@@ -1879,7 +2359,7 @@ JOURNAL="$(realpath -m -- "$JOURNAL")"
 
 for protected in "$ROLLBACK_DIR" "$JOURNAL"; do
     case "$protected" in
-        "$TARGET_PROJECT_DIR"\vert{}"$TARGET_PROJECT_DIR"/*)
+        "$TARGET_PROJECT_DIR"|"$TARGET_PROJECT_DIR"/*)
             echo "STOP 8.1: журнал или rollback_dir находятся внутри project_dir" >&2
             exit 81 ;;
     esac
@@ -1915,6 +2395,11 @@ echo "Перейдите к 8.4 «Место 2» для возврата исх�
 **Основной откат:** выполнять следующий блок, только если ранний откат выше не выполнялся.
 
 ```bash
+cd /
+# cwd интерактивного шелла оператора — target.project_dir (с шага 2.7).
+# Ранний и основной откат initial удаляют TARGET_PROJECT_DIR внутри подоболочки;
+# без этого cd / родительский шелл останется в удалённом inode (getcwd: cannot
+# access parent directories). Для update команда безвредна.
 (
 set -Eeuo pipefail
 MIGRATION_MODE="⚠️**<migration.mode>**"
@@ -1937,11 +2422,11 @@ done
 TARGET_PROJECT_DIR="${TARGET_PROJECT_DIR%/}"
 ROLLBACK_DIR="${ROLLBACK_DIR%/}"
 case "$ROLLBACK_DIR/" in
-    "$TARGET_PROJECT_DIR"/*\vert{}"$TARGET_PROJECT_DIR"/)
+    "$TARGET_PROJECT_DIR"/*|"$TARGET_PROJECT_DIR"/)
         echo "STOP: rollback_dir внутри project_dir: $ROLLBACK_DIR" >&2; exit 23 ;;
 esac
 case "$JOURNAL" in
-    "$TARGET_PROJECT_DIR"\vert{}"$TARGET_PROJECT_DIR"/*)
+    "$TARGET_PROJECT_DIR"|"$TARGET_PROJECT_DIR"/*)
         echo "STOP: journal.path внутри project_dir: $JOURNAL" >&2; exit 23 ;;
 esac
 
@@ -1958,7 +2443,7 @@ cleanup_containers() {
     fi
 
     if [[ -f "$TARGET_PROJECT_DIR/docker-compose.yml" ]]; then
-        docker compose down "${down_args[@]}" \vert{}\vert{} rc=$?
+        docker compose down "${down_args[@]}" || rc=$?
     else
         echo "WARN 8.1: docker-compose.yml отсутствует — compose down пропущен" >&2
         rc=1
@@ -2043,9 +2528,14 @@ PG_SRC='⚠️**<database.pgdata.source>**'
 [[ "$MIGRATION_MODE" == "initial" ]] && { echo "8.2: mode=initial — откат файлов не требуется, пропускаем"; exit 0; }
 
 # ── 1. проверка подстановки ──
-for v in TARGET_PROJECT_DIR ROLLBACK_DIR JOURNAL PG_KIND PG_SRC; do
+for v in TARGET_PROJECT_DIR ROLLBACK_DIR JOURNAL; do
     val="${!v}"
     [[ -n "$val" && "$val" == /* && "$val" != *'⚠️'* && "$val" != *'<'* && "$val" != *'>'* && "$val" != *'['* && "$val" != *']'* && "$val" != *'**'* ]] \
+        || { echo "STOP: $v не подставлена: '$val'" >&2; exit 22; }
+done
+for v in PG_KIND PG_SRC; do
+    val="${!v}"
+    [[ -n "$val" && "$val" != *'⚠️'* && "$val" != *'<'* && "$val" != *'>'* && "$val" != *'['* && "$val" != *']'* && "$val" != *'**'* ]] \
         || { echo "STOP: $v не подставлена: '$val'" >&2; exit 22; }
 done
 TARGET_PROJECT_DIR="${TARGET_PROJECT_DIR%/}"
@@ -2053,18 +2543,18 @@ ROLLBACK_DIR="${ROLLBACK_DIR%/}"
 
 # ── 2. guard: точка отката не внутри зоны --delete ──
 case "$ROLLBACK_DIR/" in
-    "$TARGET_PROJECT_DIR"/*\vert{}"$TARGET_PROJECT_DIR"/)
+    "$TARGET_PROJECT_DIR"/*|"$TARGET_PROJECT_DIR"/)
         echo "STOP: rollback_dir внутри project_dir: $ROLLBACK_DIR" >&2; exit 23 ;;
 esac
 case "$JOURNAL" in
-    "$TARGET_PROJECT_DIR"\vert{}"$TARGET_PROJECT_DIR"/*)
+    "$TARGET_PROJECT_DIR"|"$TARGET_PROJECT_DIR"/*)
         echo "STOP: journal.path внутри project_dir (будет затёрт rsync --delete): $JOURNAL" >&2; exit 23 ;;
 esac
-[[ -d "$TARGET_PROJECT_DIR" ]] \vert{}\vert{} { echo "STOP: нет каталога $TARGET_PROJECT_DIR" >&2; exit 26; }
+[[ -d "$TARGET_PROJECT_DIR" ]] || { echo "STOP: нет каталога $TARGET_PROJECT_DIR" >&2; exit 26; }
 cd -- "$TARGET_PROJECT_DIR" || { echo "STOP: cd не выполнен" >&2; exit 26; }
 
 # ── 3. выбор точки: чтение последнего run_id, где подтверждены И 3.1 ok, И 3.2.3 ok ──
-[[ -f "$JOURNAL" ]] \vert{}\vert{} { echo "STOP: нет журнала $JOURNAL" >&2; exit 24; }
+[[ -f "$JOURNAL" ]] || { echo "STOP: нет журнала $JOURNAL" >&2; exit 24; }
 read -r RUN_ID BACKUP < <(awk -F'\t' '
     $1=="3.1" && $3=="ok" {
         r=""; b="";
@@ -2080,7 +2570,7 @@ read -r RUN_ID BACKUP < <(awk -F'\t' '
     END { if(valid_r!="" && valid_r==last_r) print valid_r, f[valid_r] }
 ' "$JOURNAL") || true
 
-if [[ -z "$BACKUP" || ! -d "$BACKUP" \vert{}\vert{} ! -f "$BACKUP/docker-compose.yml" ]]; then
+if [[ -z "$BACKUP" || ! -d "$BACKUP" || ! -f "$BACKUP/docker-compose.yml" ]]; then
     echo "STOP: в журнале для последнего запуска 3.1 нет подтверждённой пары (3.1 ok + 3.2.3 ok) с валидным каталогом. RUN_ID='${RUN_ID:-}' BACKUP='${BACKUP:-}'" >&2
     exit 24
 fi
@@ -2099,7 +2589,8 @@ read -r -p 'Продолжить? [yes/NO] ' a
 # ── 5. формирование исключений и восстановление ──
 RSYNC_EXCLUDES=()
 if [[ "$PG_KIND" == "bind" && "$PG_SRC" != /* ]]; then
-    RSYNC_EXCLUDES=("--exclude=/${PG_SRC#./}")
+    PG_REL="${PG_SRC#./}"; PG_REL="${PG_REL%/}"
+    RSYNC_EXCLUDES=("--exclude=/${PG_REL}")
 fi
 
 sudo rsync -aHAX --numeric-ids --delete "${RSYNC_EXCLUDES[@]}" -- "$BACKUP/" "$TARGET_PROJECT_DIR/" \
@@ -2171,9 +2662,14 @@ PG_SRC='⚠️**<database.pgdata.source>**'
 [[ "$MIGRATION_MODE" == "initial" ]] && { echo "8.3: mode=initial — откат БД не требуется, пропускаем"; exit 0; }
 
 # ── 1. проверка подстановки ──
-for v in TARGET_PROJECT_DIR ROLLBACK_DIR JOURNAL PG_KIND PG_SRC; do
+for v in TARGET_PROJECT_DIR ROLLBACK_DIR JOURNAL; do
     val="${!v}"
     [[ -n "$val" && "$val" == /* && "$val" != *'⚠️'* && "$val" != *'<'* && "$val" != *'>'* && "$val" != *'['* && "$val" != *']'* && "$val" != *'**'* ]] \
+        || { echo "STOP: $v не подставлена: '$val'" >&2; exit 22; }
+done
+for v in PG_KIND PG_SRC; do
+    val="${!v}"
+    [[ -n "$val" && "$val" != *'⚠️'* && "$val" != *'<'* && "$val" != *'>'* && "$val" != *'['* && "$val" != *']'* && "$val" != *'**'* ]] \
         || { echo "STOP: $v не подставлена: '$val'" >&2; exit 22; }
 done
 for v in DB_SERVICE DB_USER DB_NAME; do
@@ -2183,6 +2679,23 @@ for v in DB_SERVICE DB_USER DB_NAME; do
 done
 TARGET_PROJECT_DIR="${TARGET_PROJECT_DIR%/}"
 cd -- "$TARGET_PROJECT_DIR" || { echo "STOP: cd не выполнен" >&2; exit 26; }
+
+# ── 1.5. Восстановление образов отката (до запуска СУБД) ──
+ROLLBACK_IMAGE_ARCHIVE="${ROLLBACK_DIR}/images_rollback.tar"
+[[ -s "$ROLLBACK_IMAGE_ARCHIVE" && -s "${ROLLBACK_IMAGE_ARCHIVE}.images" ]] \
+    || { echo "STOP: отсутствует архив образов отката $ROLLBACK_IMAGE_ARCHIVE или список ${ROLLBACK_IMAGE_ARCHIVE}.images" >&2; exit 24; }
+
+docker load -i "$ROLLBACK_IMAGE_ARCHIVE"
+
+mapfile -t EXPECTED_IMAGES < "${ROLLBACK_IMAGE_ARCHIVE}.images"
+((${#EXPECTED_IMAGES[@]} > 0)) \
+    || { echo "STOP: список образов отката ${ROLLBACK_IMAGE_ARCHIVE}.images пуст" >&2; exit 22; }
+
+for image in "${EXPECTED_IMAGES[@]}"; do
+    [[ -n "$image" ]] || continue
+    docker image inspect "$image" >/dev/null 2>&1 \
+        || { echo "STOP: после загрузки отсутствует образ отката '$image'" >&2; exit 27; }
+done
 
 # ── 2. точка отката: строго тот же run_id, что и для файлов (или последняя полная пара 3.1+3.2.3) ──
 [[ -f "$JOURNAL" ]] || { echo "STOP: нет журнала $JOURNAL" >&2; exit 70; }
@@ -2218,7 +2731,8 @@ sha256sum -c "${DUMP}.sha256" >/dev/null \
 [[ "${SRC_PG:-?}" != "?" ]] || SRC_PG=""    
 
 # ── 4. запрет downgrade (проверка по образу ДО монтирования PGDATA) ──
-DST_PG="$(docker compose run --rm --no-deps --entrypoint postgres "$DB_SERVICE" --version | sed -E 's/^[^0-9]*([0-9]+).*/\1/')"
+DST_PG="$(docker compose run -T --rm --no-deps --entrypoint postgres "$DB_SERVICE" --version \
+    | tr -d '\r' | sed -E 's/^[^0-9]*([0-9]+).*/\1/')"
 if [[ -n "$SRC_PG" && "$DST_PG" -lt "$SRC_PG" ]]; then
     echo "STOP: target PG $DST_PG < source PG $SRC_PG — дамп несовместим" >&2; exit 73
 fi
@@ -2246,15 +2760,25 @@ if ! docker compose exec -T "$DB_SERVICE" sh -c "pg_isready -h 127.0.0.1 -U \"\$
         else
             MNT_PATH="${TARGET_PROJECT_DIR}/${PG_SRC}"
         fi
-        sudo rm -rf -- "${MNT_PATH:?}"/*
+        sudo find "${MNT_PATH:?}" -mindepth 1 -delete
         echo "Очищена bind-директория: $MNT_PATH"
     elif [[ "$PG_KIND" == "volume" ]]; then
-        VOL_NAME="$(docker volume ls -q --filter "label=com.docker.compose.project.working_dir=$TARGET_PROJECT_DIR" --filter "label=com.docker.compose.volume=$PG_SRC" || true)"
+        PROJ="$(docker compose config | awk '/^name:/ {print $2}')"
+        VOL_NAME="$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJ" --filter "label=com.docker.compose.volume=$PG_SRC" || true)"
+        if [[ -z "$VOL_NAME" ]] && docker volume inspect "$PG_SRC" >/dev/null 2>&1; then
+            VOL_NAME="$PG_SRC"
+        fi
+        if [[ -z "$VOL_NAME" && -n "$PROJ" ]] && docker volume inspect "${PROJ}_${PG_SRC}" >/dev/null 2>&1; then
+            VOL_NAME="${PROJ}_${PG_SRC}"
+        fi
         if [[ -n "$VOL_NAME" ]]; then
-            docker volume rm -f "$VOL_NAME" >/dev/null || true
+            docker volume rm -f "$VOL_NAME" >/dev/null \
+                || { echo "STOP 8.3: не удалось удалить том $VOL_NAME" >&2; exit 32; }
+            docker volume inspect "$VOL_NAME" >/dev/null 2>&1 \
+                && { echo "STOP 8.3: том $VOL_NAME всё ещё существует после rm -f" >&2; exit 32; }
             echo "Удален том: $VOL_NAME"
         else
-            echo "WARN: Том $PG_SRC не найден (возможно, уже удален)" >&2
+            echo "WARN 8.3: том '$PG_SRC' не найден ни через labels, ни через inspect; продолжаем — up -d создаст пустой том под восстановление." >&2
         fi
     else
         echo "STOP: Неизвестный database.pgdata.kind: $PG_KIND" >&2
@@ -2310,26 +2834,11 @@ echo "  next   : 8.4 (поднять образ, зафиксированный 
 ```bash
 (
 set -Eeuo pipefail
-trap 'rc=$?; echo "FAIL 8.4.B rc=$rc line=$LINENO" >&2' ERR
+trap 'rc=$?; echo "FAIL 8.4 rc=$rc line=$LINENO" >&2' ERR
 
-cd -- "⚠️**<target.project_dir>**"
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
 
-ROLLBACK_IMAGE_ARCHIVE="⚠️**<journal.rollback_dir>**/images_rollback.tar"
-[[ -s "$ROLLBACK_IMAGE_ARCHIVE" && -s "${ROLLBACK_IMAGE_ARCHIVE}.images" ]] \
-    || { echo "STOP: отсутствует архив образов отката $ROLLBACK_IMAGE_ARCHIVE или список ${ROLLBACK_IMAGE_ARCHIVE}.images" >&2; exit 24; }
-
-docker load -i "$ROLLBACK_IMAGE_ARCHIVE"
-
-mapfile -t EXPECTED_IMAGES < "${ROLLBACK_IMAGE_ARCHIVE}.images"
-((${#EXPECTED_IMAGES[@]} > 0)) \
-    || { echo "STOP: список образов отката ${ROLLBACK_IMAGE_ARCHIVE}.images пуст" >&2; exit 22; }
-
-for image in "${EXPECTED_IMAGES[@]}"; do
-    [[ -n "$image" ]] || continue
-    docker image inspect "$image" >/dev/null 2>&1 \
-        || { echo "STOP: после загрузки отсутствует образ отката '$image'" >&2; exit 27; }
-done
-
+cd -- "$TARGET_PROJECT_DIR"
 docker compose up -d --no-build
 )
 ```
@@ -2339,11 +2848,14 @@ docker compose up -d --no-build
 **Место 1 (целевой сервер):**
 
 ```bash
-cd ⚠️**<target.project_dir>**
+TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+APP_SERVICE=⚠️**<application.service>**
+
+cd "$TARGET_PROJECT_DIR"
 
 # Проверка успешного старта всех контейнеров
 docker compose ps
-docker compose logs --tail=50 ⚠️**<application.service>**
+docker compose logs --tail=50 "$APP_SERVICE"
 ```
 
 Запустите внешние источники записи на **целевом** сервере (`worker`, `cron`, `systemd-таймеры`), которые были остановлены на шаге 3.0.
@@ -2355,7 +2867,9 @@ docker compose logs --tail=50 ⚠️**<application.service>**
 - **При `capture_method = stop_writers` (Вариант А шага 5.1):**
 
 ```bash
-cd ⚠️**<source.project_dir>**
+SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
+
+cd "$SOURCE_PROJECT_DIR"
 # Запуск ВСЕХ остановленных сервисов Compose-стека.
 # Если контейнеры на источнике были удалены (docker compose down), команда fallback поднимет их заново.
 docker compose start || docker compose up -d
@@ -2367,10 +2881,13 @@ docker compose ps
 - **При `capture_method = coordinated` (Вариант Б шага 5.1):**
 
 ```bash
-cd ⚠️**<source.project_dir>**
+SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
+APP_SERVICE=⚠️**<application.service>**
+
+cd "$SOURCE_PROJECT_DIR"
 # Гарантируем, что контейнер application работает до вызова exec (защита от остановки в период между 5.1 и 8.4)
-docker compose start ⚠️**<application.service>** || docker compose up -d ⚠️**<application.service>**
-docker compose exec -T ⚠️**<application.service>** python manage.py set_maintenance_mode off
+docker compose start "$APP_SERVICE" || docker compose up -d "$APP_SERVICE"
+docker compose exec -T "$APP_SERVICE" python manage.py set_maintenance_mode off
 ```
 
 После отключения режима обслуживания запустите остановленные в 5.1.Б.1 фоновые воркеры и внешние источники записи (`cron`, `systemd`-таймеры).
