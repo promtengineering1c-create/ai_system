@@ -1,11 +1,51 @@
+x-python-env-file: &python_env_file
+  - path: .env
+  - path: .env.${APP_ENV:?APP_ENV is required}
+    required: true
+
+x-app-image: &app_image "${APP_IMAGE_REPO:-fish-workshop}:${APP_IMAGE_TAG:?APP_IMAGE_TAG is required (immutable release tag: git SHA or semver)}"
+
 services:
-  db:
+  nginx:
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+    volumes:
+      - type: bind
+        source: ./nginx/nginx.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./data/nginx-dynamic
+        target: /etc/nginx/dynamic
+        read_only: true
+        bind:
+          create_host_path: false
+      - static_volume:/app/staticfiles:ro
+      - ./data/ssl:/etc/nginx/ssl:ro          
+      - certbot_webroot:/var/www/certbot:ro   
+    healthcheck:
+       test: ["CMD", "wget", "-qO-", "http://127.0.0.1/nginx-health"]
+       interval: 30s  
+    depends_on:
+      cert-init:
+        condition: service_completed_successfully
+      web:
+        condition: service_healthy
+    networks:
+      - edge
+
+  postgres:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:?DB_NAME is required (base .env only)}
+      POSTGRES_USER: ${DB_USER:?DB_USER is required (base .env only)}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required (base .env only)}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 3s
@@ -13,29 +53,243 @@ services:
       retries: 10
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - backend
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - redisdata:/data
+    networks:
+      - backend
+
+  migrate-job:
+    image: *app_image
+    restart: "no"
+    env_file: *python_env_file
+    environment:
+      APP_ENV: ${APP_ENV:?APP_ENV is required}
+      DB_HOST: postgres
+      DB_NAME: ${DB_NAME:?DB_NAME is required (base .env only)}
+      DB_USER: ${DB_USER:?DB_USER is required (base .env only)}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required (base .env only)}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["python", "-m", "cli.preflight_migrate"]
+    networks:
+      - backend
+
+  static-publish-job:
+    image: *app_image
+    restart: "no"
+    # Root нужен только для записи в новый или существующий static_volume.
+    # Django, БД, Redis и секреты этому job не нужны.
+    user: "0:0"
+    network_mode: none
+    command:
+      - python
+      - -c
+      - |
+        import os
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        source = Path("/app/staticfiles")
+        target = Path("/publish/static")
+        if not (source / "staticfiles.json").is_file():
+            raise SystemExit("Build-time staticfiles.json is missing")
+
+        target.mkdir(parents=True, exist_ok=True)
+        target.chmod(0o755)
+        for root, directories, files in os.walk(source):
+            destination = target / Path(root).relative_to(source)
+            destination.mkdir(parents=True, exist_ok=True)
+            destination.chmod(0o755)
+            for name in directories:
+                directory = destination / name
+                directory.mkdir(exist_ok=True)
+                directory.chmod(0o755)
+            for name in files:
+                fd, temporary = tempfile.mkstemp(
+                    prefix=".publish-", dir=destination
+                )
+                os.close(fd)
+                try:
+                    shutil.copyfile(Path(root) / name, temporary)
+                    os.chmod(temporary, 0o644)
+                    os.replace(temporary, destination / name)
+                finally:
+                    if os.path.exists(temporary):
+                        os.unlink(temporary)
+        # Старые хешированные файлы сохраняются для предыдущего релиза.
+    volumes:
+      - type: volume
+        source: static_volume
+        target: /publish/static
+        volume:
+          nocopy: true
 
   web:
+    image: *app_image
     build:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    env_file:
-      - .env
+    # stop_grace_period must exceed gunicorn --graceful-timeout by 3-5s.
+    # 15 > 10 + 5: Docker has time to see gunicorn's clean exit; gunicorn
+    # has already force-killed stragglers itself before Docker's SIGKILL.
+    stop_grace_period: 15s
+    env_file: *python_env_file
     environment:
-      DB_HOST: db
+      APP_ENV: ${APP_ENV:?APP_ENV is required}
+      DB_HOST: postgres
+      DB_NAME: ${DB_NAME:?DB_NAME is required (base .env only)}
+      DB_USER: ${DB_USER:?DB_USER is required (base .env only)}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required (base .env only)}
+      REDIS_URL: redis://redis:6379/0
       STORAGE_CACHE_DIR: /app/cache
       EXCHANGE_BASE_DIR: /exchange
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
-    command: >
-      sh -c "python manage.py migrate --noinput &&
-             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3"
-    ports:
-      - "8000:8000"
+      redis:
+        condition: service_healthy
+      migrate-job:
+        condition: service_completed_successfully
+      static-publish-job:
+        condition: service_completed_successfully
+    init: true
+    command:
+      [
+        "gunicorn", "config.wsgi:application",
+        "--bind", "0.0.0.0:8000",
+        "--workers", "4",
+        "--worker-class", "gthread",
+        "--threads", "4",
+        "--keepalive", "75",
+        "--graceful-timeout", "10",
+        "--timeout", "30"
+      ]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz/', timeout=2)"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     volumes:
-      - ./storage/cache:/app/cache
-      - ./storage/exchange:/exchange
+      - cache_volume:/app/cache
+      - exchange_volume:/exchange
+    networks:
+      - edge
+      - backend
+
+  worker:
+    image: *app_image
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file: *python_env_file
+    environment:
+      APP_ENV: ${APP_ENV:?APP_ENV is required}
+      DB_HOST: postgres
+      DB_NAME: ${DB_NAME:?DB_NAME is required (base .env only)}
+      DB_USER: ${DB_USER:?DB_USER is required (base .env only)}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required (base .env only)}
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_CACHE_DIR: /app/cache
+      EXCHANGE_BASE_DIR: /exchange
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate-job:
+        condition: service_completed_successfully
+    command: ["python", "manage.py", "run_worker"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os, time, sys; sys.exit(0 if time.time() - os.path.getmtime('/tmp/worker_heartbeat') < 60 else 1)"
+        ]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    volumes:
+      - cache_volume:/app/cache
+      - exchange_volume:/exchange
+    networks:
+      - backend
+
+  # One-shot TLS bootstrap. No network: openssl operates on the shared volume only.
+  cert-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.cert-init
+    image: ${COMPOSE_PROJECT_NAME:-app}-cert-init:${TAG:-latest}
+    restart: "no"
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp
+    # Bind-каталог создаётся compose от root; chmod 600 на privkey требует root.
+    user: "0:0"  
+    volumes:
+      - ./data/ssl:/etc/nginx/ssl
+
+  certbot:
+    image: certbot/certbot:v3.1.0  
+    profiles: ["tls"]  
+    restart: "no"            
+    volumes:
+      - ./data/letsencrypt:/etc/letsencrypt   
+      - certbot_webroot:/var/www/certbot      
+      - ./data/ssl:/ssl-out 
+      # File mount inside the letsencrypt bind mount. The engine applies
+      # nested mounts child-after-parent regardless of YAML line order;
+      # /etc/letsencrypt/cli.ini is certbot's default config search path.
+      - ./certbot/cli.ini:/etc/letsencrypt/cli.ini:ro
+      # deploy-hook referenced by cli.ini (invoked as `sh /hooks/deploy.sh`,
+      # so no exec bit is required on the host file). Initial issuance
+      # (certonly) must also run via THIS service, otherwise the first real
+      # cert never reaches /ssl-out.
+      - ./scripts/certbot_deploy_hook.sh:/hooks/deploy.sh:ro
+    # Runbook: host cron `scripts/cc.sh --profile tls run --rm certbot renew --quiet` then `scripts/cc.sh reload-nginx` after deploy-hook writes new files
+    # Руководство по эксплуатации: cron на хосте scripts/cc.sh --profile tls run --rm certbot renew --quiet затем
+    # scripts/cc.sh reload-nginx после того, как deploy-hook запишет новые файлы
+
+networks:
+  # Публичный вход: nginx ↔ web. Outbound не нужен (healthcheck, DNS — локальные).
+  edge:
+    driver: bridge
+  # Прикладной сегмент: web/worker ↔ postgres/redis + outbound (SMTP, captcha, 1C).
+  # nginx сюда не входит.
+  backend:
+    driver: bridge
 
 volumes:
   pgdata:
+    external: true
+  redisdata:
+  static_volume:
+  cache_volume:
+  exchange_volume: 
+  certbot_webroot:

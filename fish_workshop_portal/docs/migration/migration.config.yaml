@@ -77,33 +77,33 @@ journal:
 # 3. СЕРВЕРЫ
 # =============================================================================
 source:
-  ssh:
+  ssh: 
     # [MUST] IP-адрес или DNS-имя. Без схемы, пользователя и порта.
-    host: null
+    host: 192.168.22.136
     # [MUST] SSH-порт, целое число.
     port: 22
     # [MUST] Учётная запись SSH на исходном сервере.
-    user: null
+    user: kali
 
   # [MUST] Абсолютный путь к существующему каталогу проекта на исходном
   # сервере. От него отсчитываются storage.items[*].source_relative_path
   # и secrets.source_path (если задан абсолютным путём).
-  project_dir: null
+  project_dir: /home/kali/ai-system/fish_workshop_portal
 
 target:
   ssh:
     # [MUST] Адрес production-сервера для SSH.
-    host: null
+    host: 95.181.154.236 (uralsfish.ru)
     # [MUST] SSH-порт, целое число.
     port: 22
     # [MUST] Учётная запись SSH на целевом сервере.
-    user: null
+    user: uralsfish
 
   # [MUST] Абсолютный путь каталога проекта на целевом сервере.
   # Создаётся при развёртывании, если отсутствует.
   # От него отсчитываются secrets.target_relative_path и
   # storage.items[*].target_relative_path.
-  project_dir: null
+  project_dir: /srv/fish_workshop_portal
 
 # =============================================================================
 # 4. ФАЙЛ СЕКРЕТОВ

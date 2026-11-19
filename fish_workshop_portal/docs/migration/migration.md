@@ -67,9 +67,9 @@ YAML содержит входные параметры и заранее выб
 Подключение к исходному серверу по параметрам `migration.config:source.ssh.*`.
 
 ```bash
-SOURCE_SSH_PORT=⚠️**<source.ssh.port>**
-SOURCE_SSH_USER=⚠️**<source.ssh.user>**
-SOURCE_SSH_HOST=⚠️**<source.ssh.host>**
+SOURCE_SSH_PORT=22
+SOURCE_SSH_USER=kali
+SOURCE_SSH_HOST=192.168.22.136
 
 ssh -p "$SOURCE_SSH_PORT" "$SOURCE_SSH_USER"@"$SOURCE_SSH_HOST"
 ```
@@ -83,8 +83,15 @@ ssh -p "$SOURCE_SSH_PORT" "$SOURCE_SSH_USER"@"$SOURCE_SSH_HOST"
 Вывод имени хоста и пользователя сессии.
 
 ```bash
-hostname
-id -un
+HOST_NAME="$(hostname)"
+USER_SESSION="$(id -un)"
+
+STEP=2.2; 
+DATE_UTC="$(date -u +%FT%T)"
+NOTE='подтверждён исходный сервер'; 
+OUTPUT="$HOST_NAME; $USER_SESSION"
+
+printf '%s | %s | %s | %s\n' "$STEP" "$DATE_UTC" "$OUTPUT" "$NOTE"
 ```
 
 **Ожидаемый результат:** получен фактический вывод имени хоста; вывод `id -un` соответствует `source.ssh.user`.
@@ -96,9 +103,9 @@ id -un
 Подключение к целевому серверу по параметрам `migration.config:target.ssh.*`.
 
 ```bash
-TARGET_SSH_PORT=⚠️**<target.ssh.port>**
-TARGET_SSH_USER=⚠️**<target.ssh.user>**
-TARGET_SSH_HOST=⚠️**<target.ssh.host>**
+TARGET_SSH_PORT=22
+TARGET_SSH_USER=uralsfish
+TARGET_SSH_HOST=uralsfish.ru
 
 ssh -p "$TARGET_SSH_PORT" "$TARGET_SSH_USER"@"$TARGET_SSH_HOST"
 ```
@@ -112,8 +119,15 @@ ssh -p "$TARGET_SSH_PORT" "$TARGET_SSH_USER"@"$TARGET_SSH_HOST"
 Вывод имени хоста и пользователя сессии.
 
 ```bash
-hostname
-id -un
+HOST_NAME="$(hostname)"
+USER_SESSION="$(id -un)"
+
+STEP=2.4; 
+DATE_UTC="$(date -u +%FT%T)"
+NOTE='подтверждён целевой сервер'; 
+OUTPUT="$HOST_NAME; $USER_SESSION"
+
+printf '%s | %s | %s | %s\n' "$STEP" "$DATE_UTC" "$OUTPUT" "$NOTE"
 ```
 
 **Ожидаемый результат:** получен фактический вывод имени хоста; вывод `id -un` соответствует `target.ssh.user`.
@@ -123,11 +137,18 @@ id -un
 **Место выполнения:** исходный сервер, Bash.
 
 ```bash
-SOURCE_PROJECT_DIR=⚠️**<source.project_dir>**
+SOURCE_PROJECT_DIR=/home/kali/ai-system/fish_workshop_portal
 
-cd "$SOURCE_PROJECT_DIR"
-ls -la docker-compose.yml
+cd "$SOURCE_PROJECT_DIR" && \
+ls -la docker-compose.yml && \
 docker compose config --images
+
+STEP=2.5; 
+DATE_UTC="$(date -u +%FT%T)"
+NOTE="docker-compose.yml существует на исходном сервере" 
+OUTPUT=""
+
+printf '%s | %s | %s | %s\n' "$STEP" "$DATE_UTC" "$OUTPUT" "$NOTE"
 ```
 
 **Ожидаемый результат:** Выведен атрибут файла `docker-compose.yml` и список используемых образов. Директория существует и содержит валидную конфигурацию.
@@ -139,8 +160,15 @@ docker compose config --images
 **Место выполнения:** целевой сервер, Bash.
 
 ```bash
-docker --version
-docker compose version
+VERSION=$(docker --version)
+COMPOSE_VERSION=$(docker compose version)
+
+STEP=2.6; 
+DATE_UTC="$(date -u +%FT%T)"
+NOTE='Docker установлен' 
+OUTPUT="$VERSION; $COMPOSE_VERSION"
+
+printf '%s | %s | %s | %s\n' "$STEP" "$DATE_UTC" "$OUTPUT" "$NOTE"
 ```
 
 **Ожидаемый результат:** Установлен Docker и плагин docker-compose. Выведены их версии.
@@ -149,11 +177,19 @@ docker compose version
 
 ```bash
 (
-TARGET_PROJECT_DIR=⚠️**<target.project_dir>**
+TARGET_PROJECT_DIR=/srv/fish_workshop_portal
 
+[[ -d "$TARGET_PROJECT_DIR" ]] || { echo "STOP: нет каталога $TARGET_PROJECT_DIR при mode=update" >&2; exit 1; }
 test -f "$TARGET_PROJECT_DIR"/docker-compose.yml || { echo "STOP: нет docker-compose.yml при mode=update" >&2; exit 1; }
 cd "$TARGET_PROJECT_DIR"
-docker compose config --images | grep -i postgres
+POSTGRES_IMAGES=$(docker compose config --images | grep -i postgres || echo "Postgres не обнаружен")
+
+STEP=2.6; 
+DATE_UTC="$(date -u +%FT%T)"
+NOTE='целевой сервер' 
+OUTPUT="$POSTGRES_IMAGES;"
+
+printf '%s | %s | %s | %s\n' "$STEP" "$DATE_UTC" "$OUTPUT" "$NOTE"
 )
 ```
 
@@ -215,8 +251,20 @@ if [[ "$PG_KIND" == "bind" ]]; then
         mkdir -p "${TARGET_DIR}/${PG_SRC}"
     fi
 fi
+
+if [[ ! -f "$ROLLBACK_DIR/rollback_point.env" ]]; then
+    echo "Точка отката не найдена, чистить нечего."
+else
+    echo "Удаление старых артефактов отката в $ROLLBACK_DIR"
+    sudo rm -rf "$ROLLBACK_DIR"/files_backup_* \
+            "$ROLLBACK_DIR"/files_backup_*.manifest.sha256 \
+            "$ROLLBACK_DIR"/db_rollback_*.dump* \
+            "$ROLLBACK_DIR"/images_rollback.tar* \
+            "$ROLLBACK_DIR"/rollback_point.env
+fi
+
+
 )
-TARGET_DIR="⚠️**<target.project_dir>**"
 
 cd "$TARGET_DIR"
 pwd

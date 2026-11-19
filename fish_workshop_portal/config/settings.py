@@ -7,7 +7,9 @@ config = get_settings()
 
 SECRET_KEY = config.django.secret_key.get_secret_value()
 DEBUG = config.django.debug
-ALLOWED_HOSTS = config.django.allowed_hosts
+ALLOWED_HOSTS = list(
+    dict.fromkeys([*config.django.allowed_hosts, "127.0.0.1", "localhost"])
+)
 
 # stub: db.* and cli apps are registered in Stages 2-7 when their packages are created
 LOCAL_APPS = [

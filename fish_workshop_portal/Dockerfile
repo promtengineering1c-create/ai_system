@@ -4,15 +4,16 @@ WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 ENV UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0
 
-COPY pyproject.toml uv.lock* ./
+COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev --no-install-project
+    uv sync --locked --no-dev --no-install-project
 
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev
+    uv sync --locked --no-dev
 
 # dummy envs to collect static without database connection
 RUN DJANGO__SECRET_KEY=build-dummy-key \
@@ -24,6 +25,8 @@ RUN DJANGO__SECRET_KEY=build-dummy-key \
     DB_PASSWORD=dummy_pass \
     REDIS_URL=redis://dummy-redis:6379/0 \
     SECURITY_API_TOKEN=dummy-token \
+    EXCHANGE_API_TOKEN=dummy-exchange \
+    CAPTCHA_SECRET_KEY=dummy-captcha \
     SMTP_HOST=dummy-smtp \
     SMTP_USER=dummy \
     SMTP_PASSWORD=dummy \
@@ -39,6 +42,17 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 COPY --from=builder /app /app
 
+# add user
+RUN groupadd --gid 10001 app \
+    && useradd --uid 10001 --gid app \
+        --no-create-home --shell /usr/sbin/nologin app \
+    && mkdir -p /app/cache \
+        /exchange/1c_to_web /exchange/web_to_1c \
+        /exchange/archive /exchange/error \
+    && chown -R app:app /app/cache /exchange
+
+USER app
+
 EXPOSE 8000
 
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3"]
+CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "4", "--worker-class", "gthread", "--threads", "4"]
