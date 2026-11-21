@@ -3,12 +3,14 @@
 """
 
 from functools import lru_cache
+import json
 import os
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import (
+    AliasChoices,
     BeforeValidator,
     Field,
     SecretStr,
@@ -16,7 +18,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 _ALLOWED_ENV_CHARS = frozenset(
@@ -61,10 +63,25 @@ class DjangoSettings(_BaseDomainSettings):
 
     secret_key: NonEmptySecretStr
     debug: bool = False
-    allowed_hosts: list[NonEmptyStr] = Field(
-        default_factory=lambda: ["localhost", "127.0.0.1"]
+    allowed_hosts: Annotated[list[NonEmptyStr], NoDecode] = Field(
+        default_factory=lambda: ["localhost", "127.0.0.1"],
+        min_length=1,
+    )
+    
+    storage_cache_dir: Path = Field(
+        default=BASE_DIR / "cache",
+        validation_alias=AliasChoices("STORAGE_CACHE_DIR", "storage_cache_dir"),
     )
 
+    @field_validator("allowed_hosts", mode="before")
+    @classmethod
+    def parse_allowed_hosts(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("["):
+                return json.loads(stripped)
+            return [item.strip() for item in stripped.split(",") if item.strip()]
+        return value
 
 class DatabaseSettings(_BaseDomainSettings):
     model_config = SettingsConfigDict(env_prefix="DB_")
@@ -155,8 +172,8 @@ class SmtpSettings(_BaseDomainSettings):
 
     host: NonEmptyStr
     port: Port = 465
-    user: NonEmptyStr
-    password: NonEmptySecretStr
+    user: str = ""
+    password: SecretStr = SecretStr("")
     use_tls: bool = False
     use_ssl: bool = True
     default_from: NonEmptyStr
@@ -170,6 +187,13 @@ class SmtpSettings(_BaseDomainSettings):
         if (self.use_ssl and self.port == 587) or (self.use_tls and self.port == 465):
             raise ValueError(
                 f"Port {self.port} conflicts with selected encryption mode (SSL/TLS)"
+            )
+
+        has_user = bool(self.user.strip())
+        has_password = bool(self.password.get_secret_value().strip())
+        if has_user != has_password:
+            raise ValueError(
+                "SMTP_USER and SMTP_PASSWORD must be either both set or both empty"
             )
         return self
 

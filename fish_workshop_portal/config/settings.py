@@ -7,20 +7,23 @@ config = get_settings()
 
 SECRET_KEY = config.django.secret_key.get_secret_value()
 DEBUG = config.django.debug
+_EXTRA_HOSTS = ["127.0.0.1", "localhost"] if DEBUG else ["127.0.0.1"]
 ALLOWED_HOSTS = list(
-    dict.fromkeys([*config.django.allowed_hosts, "127.0.0.1", "localhost"])
+    dict.fromkeys([*config.django.allowed_hosts, *_EXTRA_HOSTS])
 )
 
-# stub: db.* and cli apps are registered in Stages 2-7 when their packages are created
-LOCAL_APPS = [
+# stub: remaining db.* and cli apps are registered in Stages 2-7 when their packages are created
+ LOCAL_APPS = [
+    "db.users.apps.UsersConfig",
     "web.apps.WebConfig",
 ]
 
-# runserver_nostatic must precede staticfiles so WhiteNoise serves static in dev
-THIRD_PARTY_APPS = [
-    "whitenoise.runserver_nostatic",
-    "django.contrib.staticfiles",
-]
+# runserver_nostatic must precede staticfiles so WhiteNoise serves static in dev only
+THIRD_PARTY_APPS = (
+    ["whitenoise.runserver_nostatic", "django.contrib.staticfiles"]
+    if DEBUG
+    else ["django.contrib.staticfiles"]
+)
 
 DJANGO_APPS = [
     "django.contrib.admin",
@@ -34,13 +37,14 @@ INSTALLED_APPS = LOCAL_APPS + THIRD_PARTY_APPS + DJANGO_APPS
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
-    "whitenoise.middleware.WhiteNoiseMiddleware",
+    *(["whitenoise.middleware.WhiteNoiseMiddleware"] if DEBUG else []),
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
-    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # Framing контролирует Nginx через CSP frame-ancestors (nginx/nginx.conf);
+    # XFrameOptionsMiddleware отключён: X_FRAME_OPTIONS="" в Django отдаёт пустой заголовок.
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -73,8 +77,36 @@ DATABASES = {
         "USER": config.db.user,
         "PASSWORD": config.db.password.get_secret_value(),
         "CONN_MAX_AGE": config.db.conn_max_age,
+        "CONN_HEALTH_CHECKS": True,
     }
 }
+
+# Reverse proxy (Nginx TLS termination, ADR-008) & session/CSRF invariants
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+# HSTS и редирект 80->443 держит Nginx; SECURE_SSL_REDIRECT сломал бы /healthz/ по HTTP
+SECURE_HSTS_SECONDS = 0
+SECURE_SSL_REDIRECT = False
+SESSION_ENGINE = "django.contrib.sessions.backends.db"
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+# На Этапе 1 держим Lax; пересмотр под cross-site iframe (SameSite=None) — только на Этапе 10 (MAX Mini App).
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SAMESITE = "Lax"
+if not DEBUG:
+    CSRF_TRUSTED_ORIGINS = list(
+        dict.fromkeys(
+            origin
+            for host in config.django.allowed_hosts
+            if host not in ("127.0.0.1", "localhost", "*", ".")
+            for origin in (
+                (f"https://{host[1:]}", f"https://*{host}")
+                if host.startswith(".")
+                else (f"https://{host}",)
+            )
+        )
+    )
+ 
+AUTH_USER_MODEL = "users.User"
 
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -124,7 +156,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 PRICE_TEMPLATE_PATH = (
     BASE_DIR / "assets" / "templates_xlsx" / "price_master_template.xlsx"
 )
-STORAGE_CACHE_DIR = BASE_DIR / "cache"
+STORAGE_CACHE_DIR = config.django.storage_cache_dir
 PRICE_XLSX_FILENAME = "price.xlsx"
 
 LOGGING = {
@@ -139,6 +171,13 @@ LOGGING = {
         "console": {
             "class": "logging.StreamHandler",
             "formatter": "standard",
+        },
+    },
+    "loggers": {
+        "django": {
+            "handlers": [],
+            "level": "INFO",
+            "propagate": True,
         },
     },
     "root": {

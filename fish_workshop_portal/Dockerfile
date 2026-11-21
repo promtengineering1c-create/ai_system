@@ -17,6 +17,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # dummy envs to collect static without database connection
 RUN DJANGO__SECRET_KEY=build-dummy-key \
+    DJANGO__DEBUG=False \
     APP_ENV=production \
     DB_HOST=db-dummy \
     DB_PORT=5432 \
@@ -25,7 +26,6 @@ RUN DJANGO__SECRET_KEY=build-dummy-key \
     DB_PASSWORD=dummy_pass \
     REDIS_URL=redis://dummy-redis:6379/0 \
     SECURITY_API_TOKEN=dummy-token \
-    EXCHANGE_API_TOKEN=dummy-exchange \
     CAPTCHA_SECRET_KEY=dummy-captcha \
     SMTP_HOST=dummy-smtp \
     SMTP_USER=dummy \
@@ -55,4 +55,4 @@ USER app
 
 EXPOSE 8000
 
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "4", "--worker-class", "gthread", "--threads", "4"]
+CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "4", "--worker-class", "gthread", "--threads", "4", "--keepalive", "75", "--graceful-timeout", "10", "--timeout", "30"]

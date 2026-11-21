@@ -12,7 +12,7 @@
 #   - COMPOSE_FILE resolved after cd; relative path anchored to repo root.
 #   - Tag charset validated; dead "" case pattern removed.
 #   - smoke_test via curl --resolve (SNI-correct), host configurable via CANONICAL_HOST.
-set -euo pipefail
+set -Eeuo pipefail
 
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
 CANONICAL_HOST="${CANONICAL_HOST:-uralsfish.ru}"
@@ -31,7 +31,7 @@ on_err() {
   printf '[rollback] FAILED (exit %d) at %s:%s. Current state:\n' "$ec" "$0" "$1" >&2
   "${COMPOSE[@]}" ps >&2 || true
   if [[ -n "$PRE_ROLLBACK_TAG" ]]; then
-    printf '[rollback] Roll forward to previous state:\n  IMAGE_TAG=%s ./scripts/deploy.sh\n' \
+    printf '[rollback] Roll forward to previous state:\n  APP_IMAGE_TAG=%s ./scripts/deploy.sh\n' \
       "$PRE_ROLLBACK_TAG" >&2
   fi
   exit "$ec"
@@ -63,8 +63,9 @@ preflight() {
   [[ -n "${APP_ENV:-}" ]] || die "APP_ENV is required"
   [[ -f ".env.${APP_ENV}" ]] || die ".env.${APP_ENV} not found"
   [[ -f nginx/nginx.conf ]] || die "nginx/nginx.conf missing"
-  [[ -f nginx/.htpasswd ]] || die "nginx/.htpasswd must be a regular file"
-  [[ -f nginx/cloudflare-ips.conf ]] || die "nginx/cloudflare-ips.conf missing"
+  [[ -d data/nginx-dynamic ]] || die "data/nginx-dynamic directory missing"
+  [[ -f data/nginx-dynamic/.htpasswd ]] || die "data/nginx-dynamic/.htpasswd must be a regular file"
+  [[ -f data/nginx-dynamic/cloudflare-ips.conf ]] || die "data/nginx-dynamic/cloudflare-ips.conf missing"
   [[ -d data/ssl ]] || die "data/ssl directory missing"
   docker info >/dev/null 2>&1 || die "docker daemon unreachable"
   docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
@@ -140,7 +141,8 @@ main() {
 
   # Same repo as the RUNNING image; compose interpolation gets the bare tag.
   local image_ref="${current_ref%:*}:${TARGET_TAG}"
-  export IMAGE_TAG="$TARGET_TAG"
+  export APP_IMAGE_REPO="${current_ref%:*}"
+  export APP_IMAGE_TAG="$TARGET_TAG"
 
   if ! image_present "$image_ref"; then
     log "image $image_ref not local; pulling"
@@ -161,7 +163,7 @@ main() {
   rollout_service web
   wait_healthy web 120
 
-  # Interpolation-mismatch guard: wrong/silently-ignored IMAGE_TAG would recreate web
+  # Interpolation-mismatch guard: wrong/silently-ignored APP_IMAGE_TAG would recreate web
   # on the CURRENT tag — a rollback that changes nothing must fail loudly.
   [[ "$(docker inspect --format '{{.Config.Image}}' "$(container_id web)")" == "$image_ref" ]] \
     || die "web runs wrong image; expected $image_ref"
@@ -176,7 +178,7 @@ main() {
   smoke_test
 
   log "rollback complete: web/worker on $TARGET_TAG (was $current_tag)"
-  log "next deploy must set IMAGE_TAG to a NEW immutable tag"
+  log "next deploy must set APP_IMAGE_TAG to a NEW immutable tag"
 }
 
 main "$@"

@@ -1,4 +1,5 @@
 """
-Точка запуска отдельного worker-процесса: цикл обработки таблицы задач PostgreSQL и поллинга файлового шлюза /exchange/1c_to_web/ с корректной обработкой сигналов SIGTERM/SIGINT.
++Тонкая Django management-команда запуска worker-процесса (Этап 7, ADR-004):
++обрабатывает сигналы SIGTERM/SIGINT (в рамках stop_grace_period) и делегирует цикл исполнения в cli.worker_runner.
 """
 

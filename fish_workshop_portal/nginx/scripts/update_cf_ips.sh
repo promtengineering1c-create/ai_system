@@ -1,64 +1,256 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env bash
+# Ежедневный root-cron обновления диапазонов Cloudflare (ADR-010 п. 7).
+# Контракт:
+#  - абсолютные пути, flock на весь цикл;
+#  - два HTTPS-запроса с таймаутами, строгая валидация семейства/CIDR,
+#    запрет default route (0.0.0.0/0, ::/0), минимум уникальных префиксов (v4 >= 15, v6 >= 7);
+#  - при ошибке загрузки/валидации активное состояние не меняется;
+#  - переход через пересечение активного и нового IPv4-списков в ipset cf_ips_v4 ->
+#    атомарная замена data/nginx-dynamic/cloudflare-ips.conf (fsync файла и каталога) ->
+#    nginx -t + reload + подтверждение смены worker-процессов -> открытие полного нового списка;
+#  - при ошибке: сохранить переходное ограничение, восстановить предыдущий include и подтвердить
+#    его загрузку перед возвратом прежнего ipset; вернуть ненулевой код;
+#  - при остановленном nginx не считать обновление применённым (отличать ошибку cc.sh ps от пустого вывода).
+set -Eeuo pipefail
 
-# Обновление доверенных префиксов Cloudflare для nginx realip.
-# Источник: https://www.cloudflare.com/ips/ (ips-v4  ips-v6).
-#
-# Инварианты:
-#  - запись строго in-place (cat >): nginx монтирует файл по inode,
-#    mv подменяет inode — контейнер навсегда видит старую версию;
-#  - без штампа даты в теле: cmp реагирует только на реальное изменение
-#    диапазонов, reload без churn;
-#  - валидация до записи (формат CIDR  floor 15/7) и nginx -t после:
-#    при провале — откат на .bak, без reload.
-#
-# Диапазоны CF стабильны (меняются за годы); ежедневный запуск оправдан
-# нулевой ценой, а не частотой изменений.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export APP_ENV="${APP_ENV:-production}"
 
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CC="${REPO_ROOT}/scripts/cc.sh"
+DYNAMIC_DIR="${REPO_ROOT}/data/nginx-dynamic"
+OUT="${DYNAMIC_DIR}/cloudflare-ips.conf"
+LOCK_FILE="/run/lock/update_cf_ips.lock"
+IPSET_NAME="${CF_IPSET_NAME:-cf_ips_v4}"
+TMP_IPSET="${IPSET_NAME}_tmp_$$"
 
-OUT="./nginx/cloudflare-ips.conf"
-BAK="${OUT}.bak"
+log() { printf '[update_cf_ips] %s\n' "$*"; }
+die() { printf '[update_cf_ips] FATAL: %s\n' "$*" >&2; exit 1; }
 
-V4="$(curl -fsS --max-time 30 https://www.cloudflare.com/ips-v4)" || {
-    echo "fetch ips-v4 failed" >&2; exit 1;
+[[ -d "${DYNAMIC_DIR}" ]] || die "runtime directory missing: ${DYNAMIC_DIR}"
+[[ -x "${CC}" ]] || die "cc.sh missing or not executable: ${CC}"
+command -v flock >/dev/null 2>&1 || die "flock not found"
+command -v curl >/dev/null 2>&1 || die "curl not found"
+command -v ipset >/dev/null 2>&1 || die "ipset not found"
+command -v python3 >/dev/null 2>&1 || die "python3 not found"
+
+mkdir -p "$(dirname "${LOCK_FILE}")"
+exec 9>"${LOCK_FILE}"
+flock -n 9 || die "another update_cf_ips.sh instance is already running"
+
+TMP_DIR="$(mktemp -d "${DYNAMIC_DIR}/.cf-update.XXXXXX")"
+cleanup() {
+  rm -rf "${TMP_DIR}"
+  ipset destroy "${TMP_IPSET}" >/dev/null 2>&1 || true
 }
-V6="$(curl -fsS --max-time 30 https://www.cloudflare.com/ips-v6)" || {
-    echo "fetch ips-v6 failed" >&2; exit 1;
+trap cleanup EXIT
+
+RAW_V4="${TMP_DIR}/raw_v4.txt"
+RAW_V6="${TMP_DIR}/raw_v6.txt"
+NEW_V4="${TMP_DIR}/new_v4.txt"
+NEW_V6="${TMP_DIR}/new_v6.txt"
+ACTIVE_V4="${TMP_DIR}/active_v4.txt"
+INTERSECT_V4="${TMP_DIR}/intersect_v4.txt"
+CANDIDATE="${TMP_DIR}/cloudflare-ips.conf"
+PREV_OUT="${TMP_DIR}/prev_cloudflare-ips.conf"
+
+curl -fsS --proto '=https' --connect-timeout 10 --max-time 30 \
+  https://www.cloudflare.com/ips-v4 -o "${RAW_V4}" \
+  || die "fetch ips-v4 failed"
+curl -fsS --proto '=https' --connect-timeout 10 --max-time 30 \
+  https://www.cloudflare.com/ips-v6 -o "${RAW_V6}" \
+  || die "fetch ips-v6 failed"
+
+python3 - "${RAW_V4}" "${RAW_V6}" "${NEW_V4}" "${NEW_V6}" "${CANDIDATE}" <<'EOF'
+import ipaddress
+import sys
+from pathlib import Path
+
+raw_v4, raw_v6, out_v4, out_v6, out_conf = map(Path, sys.argv[1:6])
+
+
+def parse_family(path: Path, version: int, min_unique: int) -> list[str]:
+    seen: set[str] = set()
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            net = ipaddress.ip_network(line, strict=True)
+        except ValueError as exc:
+            raise SystemExit(f"invalid CIDR '{line}': {exc}") from None
+        if net.version != version:
+            raise SystemExit(f"wrong IP family for '{line}': expected IPv{version}")
+        if net.prefixlen == 0:
+            raise SystemExit(f"default route forbidden: '{line}'")
+        seen.add(str(net))
+    if len(seen) < min_unique:
+        raise SystemExit(
+            f"IPv{version} unique prefix count {len(seen)} below floor {min_unique}"
+        )
+    return sorted(seen, key=ipaddress.ip_network)
+
+
+v4 = parse_family(raw_v4, 4, 15)
+v6 = parse_family(raw_v6, 6, 7)
+
+out_v4.write_text("\n".join(v4) + "\n", encoding="utf-8")
+out_v6.write_text("\n".join(v6) + "\n", encoding="utf-8")
+
+lines = [
+    "# AUTO-GENERATED by scripts/update_cf_ips.sh — не редактировать руками.",
+    "# Источник: https://www.cloudflare.com/ips/. ADR-010 (directory bind /etc/nginx/dynamic).",
+    "# IPv6-записи инертны до включения v6 end-to-end — см. ADR-010.",
+    *(f"set_real_ip_from {cidr};" for cidr in v4),
+    *(f"set_real_ip_from {cidr};" for cidr in v6),
+]
+out_conf.write_text("\n".join(lines) + "\n", encoding="utf-8")
+EOF
+
+ipset list -n "${IPSET_NAME}" >/dev/null 2>&1 \
+  || die "ipset '${IPSET_NAME}' does not exist; firewall not initialized (ADR-010)"
+
+ipset list "${IPSET_NAME}" | python3 - "${ACTIVE_V4}" "${NEW_V4}" "${INTERSECT_V4}" <<'EOF'
+import ipaddress
+import sys
+from pathlib import Path
+
+active_out, new_in, intersect_out = map(Path, sys.argv[1:4])
+
+active: set[str] = set()
+in_members = False
+for raw in sys.stdin:
+    line = raw.strip()
+    if line == "Members:":
+        in_members = True
+        continue
+    if not in_members or not line:
+        continue
+    token = line.split()[0]
+    net = ipaddress.IPv4Network(token, strict=True)
+    active.add(str(net))
+
+new_set = {
+    line.strip()
+    for line in new_in.read_text(encoding="utf-8").splitlines()
+    if line.strip()
 }
 
-echo "$V4" | grep -Ev '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' >/dev/null && {
-    echo "invalid IPv4 CIDR in payload" >&2; exit 1;
-}
-echo "$V6" | grep -Ev '^[0-9a-fA-F:]/[0-9]{1,3}$' >/dev/null && {
-    echo "invalid IPv6 CIDR in payload" >&2; exit 1;
-}
-[ "$(echo "$V4" | grep -c .)" -ge 15 ] || { echo "v4 below floor" >&2; exit 1; }
-[ "$(echo "$V6" | grep -c .)" -ge 7 ]  || { echo "v6 below floor" >&2; exit 1; }
+active_sorted = sorted(active, key=ipaddress.IPv4Network)
+inter_sorted = sorted(active & new_set, key=ipaddress.IPv4Network)
 
-TMP="$(mktemp)"
-trap 'rm -f "$TMP"' EXIT
+active_out.write_text(("\n".join(active_sorted) + "\n") if active_sorted else "", encoding="utf-8")
+intersect_out.write_text(("\n".join(inter_sorted) + "\n") if inter_sorted else "", encoding="utf-8")
+EOF
 
-{
-    echo "# AUTO-GENERATED by scripts/update_cf_ips.sh — не редактировать руками."
-    echo "# Источник: https://www.cloudflare.com/ips/. Обновление in-place (bind mount по inode)."
-    echo "# IPv6-записи инертны до включения v6 end-to-end — см. ADR-010."
-    echo "$V4" | sed 's/^/set_real_ip_from /;s/$/;/'
-    echo "$V6" | sed 's/^/set_real_ip_from /;s/$/;/'
-} > "$TMP"
-
-if cmp -s "$TMP" "$OUT"; then
-    exit 0
+if [[ -f "${OUT}" ]] && cmp -s "${CANDIDATE}" "${OUT}" && cmp -s "${ACTIVE_V4}" "${NEW_V4}"; then
+  exit 0
 fi
 
-cp "$OUT" "$BAK" 2>/dev/null || true
-cat "$TMP" > "$OUT"
+# Проверка статуса nginx: отличаем ошибку cc.sh ps от пустого вывода.
+if ! running_svcs="$("${CC}" ps --status running --services)"; then
+  die "cc.sh ps failed; state unchanged"
+fi
+if ! printf '%s\n' "${running_svcs}" | grep -qx 'nginx'; then
+  die "nginx is not running; update not applied (will complete on next deploy)"
+fi
 
-if docker compose exec -T nginx nginx -t; then
-    docker compose exec -T nginx nginx -s reload
-    echo "cf realip updated, nginx reloaded"
+apply_ipset() {
+  local list_file="$1"
+  ipset destroy "${TMP_IPSET}" >/dev/null 2>&1 || true
+  ipset create "${TMP_IPSET}" hash:net family inet
+  while IFS= read -r cidr; do
+    [[ -n "${cidr}" ]] && ipset add "${TMP_IPSET}" "${cidr}" -exist
+  done < "${list_file}"
+  ipset swap "${TMP_IPSET}" "${IPSET_NAME}"
+  ipset destroy "${TMP_IPSET}"
+}
+
+atomic_install_fsync() {
+  local src="$1" dst="$2"
+  python3 - "${src}" "${dst}" <<'EOF'
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+data = src.read_bytes()
+
+fd, tmp_path = tempfile.mkstemp(prefix=".cloudflare-ips.tmp.", dir=dst.parent)
+try:
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp_path, 0o644)
+    os.replace(tmp_path, dst)
+finally:
+    if os.path.exists(tmp_path):
+        os.unlink(tmp_path)
+
+dir_fd = os.open(dst.parent, os.O_RDONLY)
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+EOF
+}
+
+get_worker_pids() {
+  "${CC}" exec -T nginx sh -c '
+    for p in /proc/[0-9]*; do
+      pid="${p#/proc/}"
+      [ "$pid" = "1" ] && continue
+      if tr "\0" " " < "$p/cmdline" 2>/dev/null | grep -q "nginx: worker process"; then
+        printf "%s\n" "$pid"
+      fi
+    done | LC_ALL=C sort
+  '
+}
+reload_and_confirm_nginx() {
+  local old_pids curr_pids overlap elapsed=0
+  old_pids="$(get_worker_pids)" || return 1
+  [[ -n "${old_pids}" ]] || return 1
+
+  "${CC}" exec -T nginx nginx -t || return 1
+  "${CC}" exec -T nginx nginx -s reload || return 1
+
+  while (( elapsed < 30 )); do
+    curr_pids="$(get_worker_pids || true)"
+    if [[ -n "${curr_pids}" ]]; then
+      overlap="$(LC_ALL=C comm -12 <(printf '%s\n' "${old_pids}") <(printf '%s\n' "${curr_pids}") || true)"
+      if [[ -z "${overlap}" ]] && "${CC}" exec -T nginx wget -qO- http://127.0.0.1/nginx-health >/dev/null 2>&1; then
+        return 0
+      fi
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  return 1
+}
+
+HAS_PREV=0
+if [[ -f "${OUT}" ]]; then
+  cp "${OUT}" "${PREV_OUT}"
+  HAS_PREV=1
+fi
+
+# 1. Сузить ingress до пересечения активного и нового IPv4-списков.
+apply_ipset "${INTERSECT_V4}"
+
+# 2. Атомарно заменить include (fsync файла и каталога) и подтвердить reload nginx.
+if atomic_install_fsync "${CANDIDATE}" "${OUT}" && reload_and_confirm_nginx; then
+  # 3. Открыть полный новый IPv4-список после подтверждения перехода nginx.
+  apply_ipset "${NEW_V4}"
+  log "cloudflare-ips.conf and ipset ${IPSET_NAME} updated; nginx worker transition confirmed"
 else
-    cat "$BAK" > "$OUT"
-    echo "nginx -t failed, rolled back to previous prefixes" >&2
-    exit 1
+    log "ERROR: nginx transition failed; keeping intersection restriction during rollback"
+  if [[ "${HAS_PREV}" -eq 1 ]] && atomic_install_fsync "${PREV_OUT}" "${OUT}" && reload_and_confirm_nginx; then
+    apply_ipset "${ACTIVE_V4}"
+    die "update failed; previous cloudflare-ips.conf and ipset ${IPSET_NAME} restored"
+  fi
+  die "update failed and rollback confirmation did not succeed; firewall kept on intersection"
 fi

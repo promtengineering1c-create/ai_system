@@ -28,9 +28,14 @@ def main() -> int:
         print(f"render_check: unexpected compose render: {exc}", file=sys.stderr)
         return 2
     bad = []
+    missing_pg = {p for p, _ in PAIRS if not pg.get(p)}
+    for p in sorted(missing_pg):
+        bad.append(f"missing/empty value in compose: postgres.{p}")    
     for svc in CONSUMERS:
         env = cfg["services"].get(svc, {}).get("environment", {})
         for p, a in PAIRS:
+            if p in missing_pg:
+                continue
             if env.get(a) != pg.get(p):
                 bad.append(f"mapping diverged in compose: postgres.{p} != {svc}.{a}")
     for line in bad:

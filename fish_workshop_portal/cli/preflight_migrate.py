@@ -17,6 +17,14 @@ import sys
 
 PWD_FP_FLAG = "MIGRATE_LOG_PWD_FINGERPRINT"
 
+_CONN_MARKERS = (
+    "could not connect",
+    "connection refused",
+    "could not translate host name",
+    "failed to resolve host",
+    "name or service not known",
+    "timeout expired",
+)
 
 def _hint_for(msg: str, user: str, db: str) -> str | None:
     if "password authentication failed" in msg:
@@ -41,19 +49,44 @@ def _hint_for(msg: str, user: str, db: str) -> str | None:
             f"'ALTER USER \"<old_user>\" RENAME TO \"{user}\";'\n"
             "  Последний рубеж: re-init pgdata."
         )
-    if "could not connect" in msg or "connection refused" in msg:
-        return "postgres недоступен: проверь healthcheck (pg_isready) и сеть backend."
+    if any(marker in msg for marker in _CONN_MARKERS):
+        return "postgres недоступен: проверь healthcheck (pg_isready), DNS и сеть backend."
     return None
 
+def _resolve_target(want_fp: bool) -> tuple[str, str, str, str | None]:
+    host = os.environ.get("DB_HOST")
+    db = os.environ.get("DB_NAME")
+    user = os.environ.get("DB_USER")
+    pwd = os.environ.get("DB_PASSWORD") if want_fp else None
+
+    if None in (host, db, user) or (want_fp and pwd is None):
+        try:
+            from config.env import DatabaseSettings
+
+            cfg = DatabaseSettings()
+            host = host or cfg.host
+            db = db or cfg.name
+            user = user or cfg.user
+            if want_fp and pwd is None:
+                pwd = cfg.password.get_secret_value()
+        except Exception:
+            pass
+
+    return host or "?", db or "?", user or "?", pwd
 
 def main() -> int:
-    host = os.environ.get("DB_HOST", "?")
-    db = os.environ.get("DB_NAME", "?")
-    user = os.environ.get("DB_USER", "?")
+    want_fp = os.environ.get(PWD_FP_FLAG) == "1"
+    host, db, user, pwd = _resolve_target(want_fp)
     line = f"migrate target: host={host} db={db} user={user}"
-    if os.environ.get(PWD_FP_FLAG) == "1":
-        pwd = os.environ.get("DB_PASSWORD", "")
-        line += f" pwd_sha256_8={hashlib.sha256(pwd.encode()).hexdigest()[:8]}"
+    
+    if want_fp:
+        fp = (
+            hashlib.sha256(pwd.encode()).hexdigest()[:8]
+            if pwd is not None
+            else "<unset>"
+        )
+        line += f" pwd_sha256_8={fp}"
+
     print(line, file=sys.stderr)
 
     import django
