@@ -10,6 +10,7 @@ app_name = "web"
 
 urlpatterns = [
     path("", views.IndexView.as_view(), name="index"),
+    path("healthz/", views.healthz_view, name="healthz"),
     path("price/download/", views.price_download_view, name="price_download"),
     
     # TBD(depends: stages 7-8): Маршруты 3-шаговой регистрации, подписки, входа, 

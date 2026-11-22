@@ -13,7 +13,7 @@ ALLOWED_HOSTS = list(
 )
 
 # stub: remaining db.* and cli apps are registered in Stages 2-7 when their packages are created
- LOCAL_APPS = [
+LOCAL_APPS = [
     "db.users.apps.UsersConfig",
     "web.apps.WebConfig",
 ]

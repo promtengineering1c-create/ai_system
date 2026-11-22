@@ -103,7 +103,7 @@ target:
   # Создаётся при развёртывании, если отсутствует.
   # От него отсчитываются secrets.target_relative_path и
   # storage.items[*].target_relative_path.
-  project_dir: /srv/fish_workshop_portal
+  project_dir: /srv/app/fish_workshop_portal
 
 # =============================================================================
 # 4. ФАЙЛ СЕКРЕТОВ

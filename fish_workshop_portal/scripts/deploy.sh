@@ -1,23 +1,17 @@
 #!/usr/bin/env bash
 # deploy.sh — release deployment.
-# Invariants (ADR-009/ADR-010):
+# Invariants (ADR-009/ADR-010/ADR-011):
 #   - APP_IMAGE_TAG must be immutable (git SHA / semver), `latest` rejected.
+#   - CLI-passed APP_ENV / APP_IMAGE_TAG take precedence over .env files.
+#   - DB credentials / POSTGRES_* are forbidden in .env.<APP_ENV> (L1) and compose config validated (L2).
 #   - Migrations follow Expand/Contract: rollback of web/worker does NOT roll back schema.
 #   - web rolled out start-first (docker-rollout); fallback `up -d` accepted with 5-15s window.
-#   - worker recreated independently via SIGTERM; at-least-once via BackgroundTask.locked_until.
-#   - Ingress firewall (DOCKER-USER, CF-only) MUST be verified before nginx publishes 80/443.
-# Changes vs previous revision:
-#   - LE issuance/publication step restored from v1 (stub -> real cert, idempotent).
-#   - smoke_test via curl --resolve (SNI-correct; IP-literal SNI hit ssl_reject_handshake).
-#   - set -Eeuo pipefail: ERR trap propagates into functions.
-#   - .env cascade sourced (root + .env.${APP_ENV}), like config/env.py.
-#   - docker-rollout detected as PATH binary or docker cli-plugin.
-#   - iptables/DOCKER-USER unverifiable -> FATAL (ADR-010 invariant, not WARN).
-#   - Tag format validated: ^(v?\d+\.\d+\.\d+|\d{7,40}|sha-[0-9a-f]{7,40})$.
+#   - worker controlled via ENABLE_WORKER=1 (enabled from Stage 7 when cli/run_worker is active).
+#   - Ingress firewall (DOCKER-USER, CF-only) MUST be verified in production before nginx publishes 80/443.
+#   - LE certificate issuance (canonical + www) runs only in production; publication into data/ssl is atomic.
 set -Eeuo pipefail
 
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
-CANONICAL_HOST="${CANONICAL_HOST:-uralsfish.ru}"
 COMPOSE=(docker compose -f "$COMPOSE_FILE")
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -35,16 +29,81 @@ on_err() {
 }
 trap 'on_err "$LINENO"' ERR
 
-# Compose auto-loads root .env for interpolation; load cascade into shell for our own checks.
+# Preserve CLI overrides before sourcing .env cascade so base .env cannot shadow them.
+_CLI_APP_ENV="${APP_ENV:-}"
+_CLI_APP_IMAGE_TAG="${APP_IMAGE_TAG:-}"
+_CLI_ENABLE_WORKER="${ENABLE_WORKER:-}"
+_CLI_BUILD_LOCAL="${BUILD_LOCAL:-}"
+_CLI_CANONICAL_HOST="${CANONICAL_HOST:-}"
+_CLI_LE_EMAIL="${LE_EMAIL:-}"
+_CLI_REQUIRE_FIREWALL="${REQUIRE_FIREWALL:-}"
+
 # Shell-compatible files only (KEY=VALUE, no multiline), same contract as config/env.py.
 if [[ -f .env ]]; then
-  set -a; . ./.env; set +a
-fi
-if [[ -f ".env.${APP_ENV:-}" ]]; then
-  set -a; . ".env.${APP_ENV}"; set +a
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env
+  set +a
 fi
 
+[[ -n "$_CLI_APP_ENV" ]] && APP_ENV="$_CLI_APP_ENV"
+[[ -n "$_CLI_APP_IMAGE_TAG" ]] && APP_IMAGE_TAG="$_CLI_APP_IMAGE_TAG"
+
+if [[ -n "${APP_ENV:-}" && -f ".env.${APP_ENV}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . ".env.${APP_ENV}"
+  set +a
+fi
+
+# Re-apply CLI overrides so explicit invocation arguments always win.
+[[ -n "$_CLI_APP_ENV" ]] && APP_ENV="$_CLI_APP_ENV"
+[[ -n "$_CLI_APP_IMAGE_TAG" ]] && APP_IMAGE_TAG="$_CLI_APP_IMAGE_TAG"
+[[ -n "$_CLI_ENABLE_WORKER" ]] && ENABLE_WORKER="$_CLI_ENABLE_WORKER"
+[[ -n "$_CLI_BUILD_LOCAL" ]] && BUILD_LOCAL="$_CLI_BUILD_LOCAL"
+[[ -n "$_CLI_CANONICAL_HOST" ]] && CANONICAL_HOST="$_CLI_CANONICAL_HOST"
+[[ -n "$_CLI_LE_EMAIL" ]] && LE_EMAIL="$_CLI_LE_EMAIL"
+[[ -n "$_CLI_REQUIRE_FIREWALL" ]] && REQUIRE_FIREWALL="$_CLI_REQUIRE_FIREWALL"
+
+CANONICAL_HOST="${CANONICAL_HOST:-uralsfish.ru}"
+ENABLE_WORKER="${ENABLE_WORKER:-0}"
+export APP_ENV="${APP_ENV:-}"
+export APP_IMAGE_TAG="${APP_IMAGE_TAG:-}"
+
 # ---------- preflight ----------
+verify_firewall() {
+  local iptables_bin=""
+  if command -v iptables >/dev/null 2>&1; then
+    iptables_bin="$(command -v iptables)"
+  elif [[ -x /usr/sbin/iptables ]]; then
+    iptables_bin="/usr/sbin/iptables"
+  elif [[ -x /sbin/iptables ]]; then
+    iptables_bin="/sbin/iptables"
+  else
+    die "iptables unavailable; cannot verify DOCKER-USER ingress firewall (ADR-010)"
+  fi
+
+  local -a ipt_cmd=("$iptables_bin")
+  if [[ "${EUID}" -ne 0 ]]; then
+    command -v sudo >/dev/null 2>&1 \
+      || die "root privileges or sudo required to inspect iptables DOCKER-USER (ADR-010)"
+    ipt_cmd=(sudo -n "$iptables_bin")
+  fi
+
+  local rules
+  if ! rules="$("${ipt_cmd[@]}" -S DOCKER-USER 2>&1)"; then
+    if [[ "$rules" == *"password is required"* || "$rules" == *"Permission denied"* || "$rules" == *"Operation not permitted"* ]]; then
+      die "cannot inspect DOCKER-USER without root/NOPASSWD sudo: $rules"
+    fi
+    die "iptables chain DOCKER-USER missing; ingress firewall (ADR-010) not applied"
+  fi
+
+  local duser_count
+  duser_count="$(printf '%s\n' "$rules" | grep -cE '^-A ' || true)"
+  [[ "$duser_count" -ge 1 ]] \
+    || die "DOCKER-USER is empty; origin reachable in bypass of Cloudflare (ADR-010)"
+}
+
 preflight() {
   [[ -n "${APP_ENV:-}" ]] || die "APP_ENV is required"
   [[ -n "${APP_IMAGE_TAG:-}" ]] || die "APP_IMAGE_TAG is required (git SHA or semver)"
@@ -52,11 +111,16 @@ preflight() {
     latest|""|*:latest)
       die "APP_IMAGE_TAG=$APP_IMAGE_TAG is mutable; ADR-009 requires immutable tag (git SHA or semver)" ;;
   esac
-  [[ "$APP_IMAGE_TAG" =~ ^(v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$|[0-9a-f]{7,40}$|sha-[0-9a-f]{7,40}$) ]] \
+  [[ "$APP_IMAGE_TAG" =~ ^(v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?|[0-9a-f]{7,40}|sha-[0-9a-f]{7,40})$ ]] \
     || die "APP_IMAGE_TAG=$APP_IMAGE_TAG is not a semver or git SHA"
 
   [[ -f ".env.${APP_ENV}" ]] || die ".env.${APP_ENV} not found"
   [[ -f nginx/nginx.conf ]] || die "nginx/nginx.conf missing"
+
+  # L1 (ADR-011): DB credentials must reside strictly in base .env, never in .env.<APP_ENV>.
+  if grep -qE '^[[:space:]]*(DB_(HOST|PORT|NAME|USER|PASSWORD)|POSTGRES_[A-Z0-9_]+)=' ".env.${APP_ENV}"; then
+    die "DB credentials or POSTGRES_* leaked into .env.${APP_ENV}; keep them only in base .env (ADR-011)"
+  fi
 
   # ADR-010: bootstrap runtime directory and seed cloudflare-ips.conf if absent.
   mkdir -p data/nginx-dynamic
@@ -78,22 +142,24 @@ preflight() {
   docker info >/dev/null 2>&1 || die "docker daemon unreachable"
   docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
 
+  # L2: validate resolved Compose configuration before touching running containers.
+  "${COMPOSE[@]}" config --quiet || die "docker compose config validation failed (L2)"
+
   docker volume inspect pgdata >/dev/null 2>&1 \
     || die "external volume pgdata missing; create once: docker volume create pgdata"
 
-  # ADR-010: DOCKER-USER must be populated BEFORE nginx publishes 80/443.
-  # Unverifiable invariant is FATAL, not WARN: unverifiable != absent invariant.
-  if ! command -v iptables >/dev/null 2>&1; then
-    die "iptables unavailable; cannot verify DOCKER-USER ingress firewall (ADR-010)"
+  # ADR-010: DOCKER-USER invariant is mandatory in production (or when REQUIRE_FIREWALL=1).
+  local require_fw="${REQUIRE_FIREWALL:-}"
+  if [[ -z "$require_fw" ]]; then
+    [[ "$APP_ENV" == "production" ]] && require_fw="1" || require_fw="0"
   fi
-  iptables -S DOCKER-USER >/dev/null 2>&1 \
-    || die "iptables chain DOCKER-USER missing; ingress firewall (ADR-010) not applied"
-  local duser_count
-  duser_count="$(iptables -S DOCKER-USER | grep -cE '^-A ' || true)"
-  [[ "$duser_count" -ge 1 ]] \
-    || die "DOCKER-USER is empty; origin reachable in bypass of Cloudflare (ADR-010)"
+  if [[ "$require_fw" == "1" ]]; then
+    verify_firewall
+  else
+    log "skipping DOCKER-USER check (APP_ENV=$APP_ENV, REQUIRE_FIREWALL=$require_fw)"
+  fi
 
-  log "preflight OK (APP_ENV=$APP_ENV, APP_IMAGE_TAG=$APP_IMAGE_TAG)"
+  log "preflight OK (APP_ENV=$APP_ENV, APP_IMAGE_TAG=$APP_IMAGE_TAG, ENABLE_WORKER=$ENABLE_WORKER)"
 }
 
 # ---------- helpers ----------
@@ -152,21 +218,42 @@ rollout_service() {
   fi
 }
 
-# LE issuance + publication into ./data/ssl (flat paths for nginx.conf).
-# Idempotent: skipped when a cert for $CANONICAL_HOST already exists.
+# LE issuance + atomic publication into ./data/ssl (flat paths for nginx.conf).
+# Runs only in production; idempotent when cert for $CANONICAL_HOST already exists.
 issue_le_cert() {
-  log "ensuring LE certificate for $CANONICAL_HOST (webroot)"
-  "${COMPOSE[@]}" --profile tls run --rm --entrypoint sh certbot -c "
-    [ -f /etc/letsencrypt/live/${CANONICAL_HOST}/fullchain.pem ] || \
-    certbot certonly --webroot -w /var/www/certbot -d ${CANONICAL_HOST} \
-      --email ${LE_EMAIL:?LE_EMAIL required for ACME registration} --agree-tos --non-interactive"
+  if [[ "$APP_ENV" != "production" ]]; then
+    log "skipping LE certificate issuance (APP_ENV=$APP_ENV != production)"
+    return 0
+  fi
 
-  log "publishing certificate into data/ssl"
-  "${COMPOSE[@]}" --profile tls run --rm --entrypoint sh certbot -c "
-    cp -L /etc/letsencrypt/live/${CANONICAL_HOST}/fullchain.pem /ssl-out/fullchain.pem && \
-    cp -L /etc/letsencrypt/live/${CANONICAL_HOST}/privkey.pem   /ssl-out/privkey.pem"
+  log "ensuring LE certificate for $CANONICAL_HOST and www.$CANONICAL_HOST (webroot)"
+  "${COMPOSE[@]}" --profile tls run --rm \
+    -e CANONICAL_HOST="$CANONICAL_HOST" \
+    -e LE_EMAIL="${LE_EMAIL:-}" \
+    --entrypoint sh certbot -c '
+      set -eu
+      if [ ! -f "/etc/letsencrypt/live/${CANONICAL_HOST}/fullchain.pem" ]; then
+        : "${LE_EMAIL:?LE_EMAIL is required for initial ACME registration}"
+        certbot certonly --webroot -w /var/www/certbot \
+          -d "${CANONICAL_HOST}" -d "www.${CANONICAL_HOST}" \
+          --email "${LE_EMAIL}" --agree-tos --non-interactive
+      fi
+    '
 
-  log "reloading nginx with new certificate"
+  log "publishing certificate atomically into data/ssl"
+  "${COMPOSE[@]}" --profile tls run --rm \
+    -e CANONICAL_HOST="$CANONICAL_HOST" \
+    --entrypoint sh certbot -c '
+      set -eu
+      cp -L "/etc/letsencrypt/live/${CANONICAL_HOST}/fullchain.pem" /ssl-out/fullchain.pem.tmp
+      cp -L "/etc/letsencrypt/live/${CANONICAL_HOST}/privkey.pem"   /ssl-out/privkey.pem.tmp
+      chmod 0644 /ssl-out/fullchain.pem.tmp
+      chmod 0600 /ssl-out/privkey.pem.tmp
+      mv -f /ssl-out/fullchain.pem.tmp /ssl-out/fullchain.pem
+      mv -f /ssl-out/privkey.pem.tmp   /ssl-out/privkey.pem
+    '
+
+  log "reloading nginx with published certificate"
   "${COMPOSE[@]}" exec -T nginx nginx -t
   "${COMPOSE[@]}" exec -T nginx nginx -s reload
 }
@@ -187,6 +274,11 @@ smoke_test() {
   code="$(curl -ksS --resolve "${CANONICAL_HOST}:443:127.0.0.1" -o /dev/null -w '%{http_code}' \
     "https://${CANONICAL_HOST}/exchange/" || true)"
   [[ "$code" == "404" ]] || die "/exchange/ returned $code (expected 404)"
+
+  log "smoke: /admin/ must require HTTP Basic Auth (401)"
+  code="$(curl -ksS --resolve "${CANONICAL_HOST}:443:127.0.0.1" -o /dev/null -w '%{http_code}' \
+    "https://${CANONICAL_HOST}/admin/" || true)"
+  [[ "$code" == "401" ]] || die "/admin/ returned $code (expected 401)"
 
   log "smoke: canonical / reachable"
   code="$(curl -ksS --resolve "${CANONICAL_HOST}:443:127.0.0.1" -o /dev/null -w '%{http_code}' \
@@ -224,10 +316,14 @@ main() {
   rollout_service web
   wait_healthy web 120
 
-  # worker: SIGTERM -> finish current task -> exit. Queue survives (locked_until lease).
-  log "recreating worker"
-  "${COMPOSE[@]}" up -d --no-deps worker
-  wait_healthy worker 90
+  if [[ "$ENABLE_WORKER" == "1" ]]; then
+    # worker: SIGTERM -> finish current task -> exit. Queue survives (locked_until lease).
+    log "recreating worker"
+    "${COMPOSE[@]}" up -d --no-deps worker
+    wait_healthy worker 90
+  else
+    log "skipping worker (ENABLE_WORKER=$ENABLE_WORKER; enable from Stage 7)"
+  fi
 
   # nginx: image is pinned; config-only change -> test + reload (zero downtime).
   if "${COMPOSE[@]}" ps --status running --services | grep -qx nginx; then
@@ -239,7 +335,7 @@ main() {
     "${COMPOSE[@]}" up -d --no-deps nginx
   fi
 
-  # Stub -> real certificate, idempotent; no-op when LE cert already published.
+  # Stub -> real certificate in production, idempotent; skipped in dev/staging.
   issue_le_cert
 
   smoke_test

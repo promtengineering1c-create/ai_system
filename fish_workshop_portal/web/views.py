@@ -6,7 +6,7 @@ import io
 from typing import Any
 
 from django.conf import settings
-from django.http import FileResponse, Http404, HttpRequest
+from django.http import FileResponse, Http404, HttpRequest, HttpResponse
 from django.views.generic import TemplateView
 
 from config.container import get_storage
@@ -46,3 +46,8 @@ def price_download_view(request: HttpRequest) -> FileResponse:
 # 3-шагового онбординга подписки, регистрации, входа и сброса пароля будут 
 # реализованы по мере внедрения account_service и subscription_service.
 
+
+
+def healthz_view(request: HttpRequest) -> HttpResponse:
+    """Легковесный эндпоинт проверки готовности для Docker healthcheck без запросов к БД."""
+    return HttpResponse("ok", content_type="text/plain", status=200)

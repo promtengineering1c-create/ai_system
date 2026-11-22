@@ -46,6 +46,7 @@ COPY --from=builder /app /app
 RUN groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app \
         --no-create-home --shell /usr/sbin/nologin app \
+    && chmod -R a+rX /app \
     && mkdir -p /app/cache \
         /exchange/1c_to_web /exchange/web_to_1c \
         /exchange/archive /exchange/error \
@@ -55,4 +56,4 @@ USER app
 
 EXPOSE 8000
 
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "4", "--worker-class", "gthread", "--threads", "4", "--keepalive", "75", "--graceful-timeout", "10", "--timeout", "30"]
+CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "4", "--worker-class", "gthread", "--threads", "4", "--keep-alive", "75", "--graceful-timeout", "10", "--timeout", "30"]

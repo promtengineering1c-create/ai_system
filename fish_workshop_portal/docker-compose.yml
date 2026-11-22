@@ -176,7 +176,7 @@ services:
         "--workers", "4",
         "--worker-class", "gthread",
         "--threads", "4",
-        "--keepalive", "75",
+        "--keep-alive", "75",
         "--graceful-timeout", "10",
         "--timeout", "30"
       ]
