@@ -133,3 +133,15 @@ curl -Iks https://uralsfish.ru/ | head -n 1
 # 2. Создание суперпользователя для входа в https://uralsfish.ru/admin/
 cd ~/ai-system/fish_workshop_portal && \
 APP_ENV=development ./scripts/cc.sh exec web python manage.py createsuperuser
+
+
+---
+
+# Просто запуск
+./scripts/cc.sh up -d --wait postgres redis
+./scripts/cc.sh run --rm migrate-job
+./scripts/cc.sh up -d --wait web nginx
+
+или ./scripts/cc.sh up -d --wait
+
+./scripts/cc.sh stop

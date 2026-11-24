@@ -63,7 +63,12 @@ case "${SUBCMD}" in
     ;;
 esac
 
+
 # --- APP_ENV: валидация символов, зеркало config/env.py (Path Traversal, ADR-008) ---
+if [ -z "${APP_ENV:-}" ] && [ -f .env ]; then
+  APP_ENV="$(grep -E '^(export[[:space:]]+)?APP_ENV=' .env | tail -n1 | sed -E 's/^(export[[:space:]]+)?APP_ENV=//; s/^["'\'']|["'\'']$//g; s/\r$//')"
+fi
+
 APP_ENV="${APP_ENV:?APP_ENV is required}"
 [[ "${APP_ENV}" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "cc.sh: invalid APP_ENV '${APP_ENV}'" >&2; exit 1; }
 
